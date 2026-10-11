@@ -27,6 +27,10 @@ struct NativeAddressField: NSViewRepresentable {
     field.cell?.usesSingleLineMode = true
     field.setContentHuggingPriority(.defaultLow, for: .horizontal)
     field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+    // A borderless NSTextField draws at the top of its bounds. Keep its native line height
+    // and center that line in the capsule instead of centering an oversized text field.
+    field.setContentHuggingPriority(.required, for: .vertical)
+    field.setContentCompressionResistancePriority(.required, for: .vertical)
     field.delegate = context.coordinator
     field.onFocus = { context.coordinator.parent.isFocused = true }
     field.setAccessibilityLabel("Address and search")
@@ -101,8 +105,7 @@ final class AddressFieldContainer: NSView {
     NSLayoutConstraint.activate([
       field.leadingAnchor.constraint(equalTo: leadingAnchor),
       field.trailingAnchor.constraint(equalTo: trailingAnchor),
-      field.centerYAnchor.constraint(equalTo: centerYAnchor),
-      field.heightAnchor.constraint(equalToConstant: 24)
+      field.centerYAnchor.constraint(equalTo: centerYAnchor)
     ])
   }
   required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
