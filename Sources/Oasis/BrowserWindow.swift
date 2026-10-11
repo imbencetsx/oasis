@@ -51,18 +51,23 @@ struct BrowserWindowHost: View {
 struct BrowserWindow: View {
   @Bindable var session: BrowserSession
   @Environment(\.colorScheme) private var colorScheme
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
   var body: some View {
     ZStack {
       WindowBackdrop()
       HStack(spacing: 0) {
-        if session.showsTabSidebar {
-          TabSidebar(session: session)
-            .overlay(alignment: .top) {
-              WindowDragArea().frame(height: 54)
-            }
-            .frame(width: 224)
-            .environment(\.colorScheme, session.selectedTab?.sidebarColorScheme ?? colorScheme)
-        }
+        TabSidebar(session: session)
+          .overlay(alignment: .top) {
+            WindowDragArea().frame(height: 54)
+          }
+          .frame(width: 224)
+          .environment(\.colorScheme, session.selectedTab?.sidebarColorScheme ?? colorScheme)
+          .offset(x: session.showsTabSidebar ? 0 : -224)
+          .opacity(session.showsTabSidebar ? 1 : 0)
+          .frame(width: session.showsTabSidebar ? 224 : 0, alignment: .leading)
+          .clipped()
+          .allowsHitTesting(session.showsTabSidebar)
+          .accessibilityHidden(!session.showsTabSidebar)
         ZStack(alignment: .top) {
           BrowserViewport(session: session)
           if let color = session.selectedTab?.chromeColor {
@@ -71,7 +76,13 @@ struct BrowserWindow: View {
               .allowsHitTesting(false)
               .accessibilityHidden(true)
           }
-          WindowDragArea().frame(height: 64)
+          // Never put a native drag view beneath an editable field or button.
+          VStack(spacing: 0) {
+            WindowDragArea().frame(height: 10)
+            Color.clear.frame(height: 42).allowsHitTesting(false)
+            WindowDragArea().frame(height: 12)
+          }
+          .frame(height: 64)
           VStack(spacing: 8) {
             BrowserChrome(session: session)
             if session.showsFind, let tab = session.selectedTab, !tab.isBlankPage {
@@ -86,6 +97,7 @@ struct BrowserWindow: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
       }
+      .animation(reduceMotion ? nil : .spring(duration: 0.36, bounce: 0.08), value: session.showsTabSidebar)
       .allowsHitTesting(!session.showsNewTabSearch)
       .accessibilityHidden(session.showsNewTabSearch)
       if session.showsNewTabSearch {
@@ -216,14 +228,14 @@ struct BrowserChrome: View {
               }
               .disabled(!(session.selectedTab?.canGoForward ?? false)).help("Forward (⌘])")
             }
-            .labelStyle(.iconOnly).buttonStyle(.plain)
+            .labelStyle(.iconOnly).buttonStyle(OasisButtonStyle())
             .font(.system(size: 13, weight: .medium))
             .frame(width: 74, height: 38)
           }
         }.frame(width: 230, alignment: .leading)
-        Spacer(minLength: 0)
-        AddressBar(session: session).frame(minWidth: 160, maxWidth: 560)
-        Spacer(minLength: 0)
+        Spacer(minLength: 0).background { WindowDragArea().frame(height: 38) }
+        AddressBar(session: session).frame(minWidth: 160, maxWidth: 560).layoutPriority(1)
+        Spacer(minLength: 0).background { WindowDragArea().frame(height: 38) }
         HStack(spacing: 10) {
           ChromeButton(
             "Downloads",
@@ -246,7 +258,7 @@ struct BrowserChrome: View {
                 .background(.primary.opacity(session.library.spoofModeEnabled ? 0.12 : 0), in: Capsule())
                 .contentShape(Rectangle())
             }
-            .toggleStyle(.button).buttonStyle(.plain).tint(.primary)
+            .toggleStyle(.button).buttonStyle(OasisButtonStyle()).tint(.primary)
             .help(session.library.spoofModeEnabled ? "Spoof Mode: On" : "Spoof Mode: Off")
             .accessibilityLabel("Spoof Mode")
             .accessibilityValue(session.library.spoofModeEnabled ? "On" : "Off")
@@ -257,7 +269,7 @@ struct BrowserChrome: View {
                 Label("Share", systemImage: "square.and.arrow.up")
                   .labelStyle(.iconOnly).frame(width: 38, height: 38)
                   .contentShape(Rectangle())
-              }.buttonStyle(.plain).help("Share this page")
+              }.buttonStyle(OasisButtonStyle()).help("Share this page")
             }
           }
           GlassChrome {
@@ -297,7 +309,7 @@ struct BrowserChrome: View {
                 .frame(width: 38, height: 38)
                 .contentShape(Rectangle())
             }
-            .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden)
+            .menuStyle(.button).buttonStyle(OasisButtonStyle()).menuIndicator(.hidden)
             .tint(.primary).frame(width: 38, height: 38)
             .help("Page actions").accessibilityLabel("Page actions")
           }
@@ -331,8 +343,8 @@ struct ChromeButton: View {
     self.action = action
   }
   var body: some View {
-    GlassChrome {
-      Button(action: action) {
+    Button(action: action) {
+      GlassChrome {
         Label {
           Text(title)
         } icon: {
@@ -341,8 +353,8 @@ struct ChromeButton: View {
         .labelStyle(.iconOnly).font(.system(size: 15))
         .frame(width: 38, height: 38)
         .contentShape(Rectangle())
-      }.buttonStyle(.plain).help(Text(title))
-    }
+      }
+    }.buttonStyle(OasisButtonStyle()).help(Text(title))
   }
 }
 
@@ -353,6 +365,7 @@ struct AddressBar: View {
   @State private var suggestionSelection: String?
   @State private var addressFocusToken = UUID()
   @State private var isFocused = false
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
   private var tab: BrowserTab? { session.selectedTab }
   private var suggestions: [AddressSuggestion] {
@@ -388,7 +401,7 @@ struct AddressBar: View {
         .font(.system(size: 12)).foregroundStyle(.secondary)
         .frame(width: 30, height: 38).contentShape(Rectangle())
       }
-      .buttonStyle(.plain).help("Website information")
+      .buttonStyle(OasisButtonStyle()).help("Website information")
       .popover(isPresented: $showsInfo) {
         VStack(alignment: .leading, spacing: 10) {
           Label(
@@ -434,8 +447,7 @@ struct AddressBar: View {
           }
         }
       )
-      .frame(maxWidth: .infinity).frame(height: 24)
-      .padding(.vertical, 7)
+      .frame(maxWidth: .infinity).frame(height: 38)
       HStack(spacing: 0) {
         if let tab, !tab.isBlankPage {
           if tab.zoom != 1 {
@@ -445,7 +457,7 @@ struct AddressBar: View {
               Text("\(Int(tab.zoom * 100))%")
                 .font(.caption2).frame(minWidth: 30, minHeight: 38)
                 .contentShape(Rectangle())
-            }.buttonStyle(.plain).help("Reset zoom")
+            }.buttonStyle(OasisButtonStyle()).help("Reset zoom")
           }
         }
       }.frame(width: 60, alignment: .trailing)
@@ -454,11 +466,15 @@ struct AddressBar: View {
     .background {
       Button(action: focus) {
         Capsule().fill(.clear).contentShape(Capsule())
-      }.buttonStyle(.plain).accessibilityLabel("Edit address")
+      }.buttonStyle(.plain)
+        .accessibilityLabel("Edit address")
     }
+    // Apply glass to its content as a single control, so it never filters the text above it.
     .glassEffect(.regular, in: .capsule)
     .overlay(
       Capsule().stroke(isFocused ? Color.oasisAccent.opacity(0.35) : .clear, lineWidth: 1.5)
+        .scaleEffect(x: reduceMotion || !isFocused ? 1 : 1.006, y: reduceMotion || !isFocused ? 1 : 1.045)
+        .animation(reduceMotion ? nil : .spring(duration: 0.32, bounce: 0.25), value: isFocused)
         .allowsHitTesting(false)
     )
     .overlay(alignment: .top) {

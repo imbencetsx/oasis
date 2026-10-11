@@ -28,7 +28,7 @@ struct DownloadsPanel: View {
             HStack {
                 Text("Downloads").font(.headline)
                 Spacer()
-                Button("Clear") { downloads.clearFinished() }.buttonStyle(.plain).font(.caption).disabled(!downloads.items.contains { $0.isFinished })
+                Button("Clear") { downloads.clearFinished() }.buttonStyle(OasisButtonStyle()).font(.caption).disabled(!downloads.items.contains { $0.isFinished })
             }.padding(18)
             Divider()
             if downloads.items.isEmpty {
@@ -49,10 +49,10 @@ struct DownloadsPanel: View {
                                 }
                                 Spacer(minLength: 4)
                                 if !item.isFinished {
-                                    Button("Cancel Download", systemImage: "xmark.circle") { downloads.cancel(item) }.labelStyle(.iconOnly).buttonStyle(.plain)
+                                    Button("Cancel Download", systemImage: "xmark.circle") { downloads.cancel(item) }.labelStyle(.iconOnly).buttonStyle(OasisButtonStyle())
                                 } else if let url = item.destination, !item.failed, item.status == "Complete" {
                                     Button("Show in Finder", systemImage: "magnifyingglass") { NSWorkspace.shared.activateFileViewerSelecting([url]) }
-                                        .labelStyle(.iconOnly).buttonStyle(.plain).help("Show in Finder")
+                                        .labelStyle(.iconOnly).buttonStyle(OasisButtonStyle()).help("Show in Finder")
                                 }
                             }.padding(15)
                             Divider()
@@ -88,7 +88,7 @@ struct ReaderView: View {
                 Button("Larger Text", systemImage: "textformat.size.larger") { fontSize = min(30, fontSize + 1) }.labelStyle(.iconOnly)
                 Divider().frame(height: 15)
                 Button("Close Reader", systemImage: "xmark") { tab.showsReader = false }.labelStyle(.iconOnly)
-            }.buttonStyle(.plain).padding(13).glassEffect(.regular, in: .capsule).padding(18)
+            }.buttonStyle(OasisButtonStyle()).padding(13).glassEffect(.regular, in: .capsule).padding(18)
         }
     }
 }

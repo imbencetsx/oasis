@@ -5,13 +5,14 @@ import SwiftUI
 struct NativeAddressField: NSViewRepresentable {
   @Binding var text: String
   @Binding var isFocused: Bool
+  @Environment(\.colorScheme) private var colorScheme
   let focusToken: UUID
   let onSubmit: () -> Void
   let onMove: (Int) -> Void
   let onEscape: () -> Void
 
   func makeCoordinator() -> Coordinator { Coordinator(self) }
-  func makeNSView(context: Context) -> AddressTextField {
+  func makeNSView(context: Context) -> AddressFieldContainer {
     let field = AddressTextField()
     field.isEditable = true
     field.isSelectable = true
@@ -20,6 +21,7 @@ struct NativeAddressField: NSViewRepresentable {
     field.drawsBackground = false
     field.focusRingType = .none
     field.font = .systemFont(ofSize: 13)
+    field.textColor = .labelColor
     field.placeholderString = "Search or enter website name"
     field.lineBreakMode = .byTruncatingMiddle
     field.cell?.usesSingleLineMode = true
@@ -28,9 +30,17 @@ struct NativeAddressField: NSViewRepresentable {
     field.delegate = context.coordinator
     field.onFocus = { context.coordinator.parent.isFocused = true }
     field.setAccessibilityLabel("Address and search")
-    return field
+    return AddressFieldContainer(field: field)
   }
-  func updateNSView(_ field: AddressTextField, context: Context) {
+  func updateNSView(_ container: AddressFieldContainer, context: Context) {
+    let field = container.field
+    // Page-adaptive SwiftUI chrome must also update the native field's appearance.
+    // Otherwise a dark-system field can render white URL text on a white page's toolbar.
+    let appearanceName: NSAppearance.Name = colorScheme == .dark ? .darkAqua : .aqua
+    if container.appearance?.name != appearanceName {
+      container.appearance = NSAppearance(named: appearanceName)
+    }
+    field.textColor = .labelColor
     context.coordinator.parent = self
     field.wantsFocus = isFocused
     field.alignment = isFocused ? .left : .center
@@ -80,6 +90,27 @@ struct NativeAddressField: NSViewRepresentable {
   }
 }
 
+/// The entire 38-point input surface accepts clicks, including its vertical padding.
+final class AddressFieldContainer: NSView {
+  let field: AddressTextField
+  init(field: AddressTextField) {
+    self.field = field
+    super.init(frame: .zero)
+    addSubview(field)
+    field.translatesAutoresizingMaskIntoConstraints = false
+    NSLayoutConstraint.activate([
+      field.leadingAnchor.constraint(equalTo: leadingAnchor),
+      field.trailingAnchor.constraint(equalTo: trailingAnchor),
+      field.centerYAnchor.constraint(equalTo: centerYAnchor),
+      field.heightAnchor.constraint(equalToConstant: 24)
+    ])
+  }
+  required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+  override var mouseDownCanMoveWindow: Bool { false }
+  override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+  override func mouseDown(with event: NSEvent) { field.mouseDown(with: event) }
+}
+
 final class AddressTextField: NSTextField {
   var wantsFocus = false
   var onFocus: (() -> Void)?
@@ -97,12 +128,17 @@ final class AddressTextField: NSTextField {
     }
   }
   override func mouseDown(with event: NSEvent) {
-    let wasEditing = currentEditor() != nil
-    if !wasEditing {
+    if currentEditor() == nil {
       wantsFocus = true
+      window?.makeFirstResponder(self)
       onFocus?()
-      focusEditor()
     }
-    super.mouseDown(with: event)
+    // The native editor handles click counts, word selection and drag selection itself.
+    // Do not reset its selectedRange or turn this gesture into a window drag.
+    if let editor = currentEditor() as? NSTextView {
+      editor.mouseDown(with: event)
+    } else {
+      super.mouseDown(with: event)
+    }
   }
 }

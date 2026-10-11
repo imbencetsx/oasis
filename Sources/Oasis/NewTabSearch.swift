@@ -57,7 +57,7 @@ struct NewTabSearch: View {
                   .frame(width: 38, height: 38)
                   .background(Color.primary.opacity(0.08), in: Circle())
                   .contentShape(Circle())
-              }.buttonStyle(.plain).disabled(
+              }.buttonStyle(OasisButtonStyle()).disabled(
                 query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
               )
               .help("Open website or search").accessibilityLabel("Open website or search")

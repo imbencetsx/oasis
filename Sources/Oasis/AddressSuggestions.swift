@@ -107,7 +107,7 @@ struct AddressSuggestionList: View {
               )
               .contentShape(RoundedRectangle(cornerRadius: 14))
             }
-            .buttonStyle(.plain)
+            .buttonStyle(OasisButtonStyle(pressScale: 0.99, hoverScale: 1.003, tilt: 0))
             .accessibilityLabel("\(suggestion.title), \(suggestion.url.displayHost)")
             .accessibilityHint("Open this website")
             .accessibilityAddTraits(selection == suggestion.id ? [.isSelected] : [])

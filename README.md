@@ -52,6 +52,10 @@ Compact sidebar tabs display each page’s favicon and document title. The capsu
 
 The native top bar matches WebKit’s derived page background color, including live changes; the sidebar keeps its translucent color tint on colored pages and returns to untinted desktop vibrancy on white or near-white pages. URL text is centered inside the capsule, and button hit targets cover their full surfaces. Website colors, HTML, and CSS are left exactly as authored.
 
+## Interaction motion
+
+Custom toolbar, sidebar, autocomplete, search, and panel controls use subtle hover lift, press compression, and a short spring return. The sidebar slides and collapses smoothly in either direction while preserving its scroll position. The address bar gives spring feedback through its focus outline; its native editor stays still for caret placement, double-click word selection, and drag selection. Window dragging is limited to empty toolbar gaps and the sidebar's top strip. Reduce Motion disables these transforms and the sidebar animation.
+
 ## Shortcuts
 
 | Action | Shortcut |

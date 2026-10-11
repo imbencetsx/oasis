@@ -13,9 +13,9 @@ struct LibraryPanel: View {
                 Text("Library").font(.system(size: 18, weight: .semibold, design: .serif))
                 Spacer()
                 Button("Done") { session.showsLibraryPanel = false }
-                    .buttonStyle(.plain).font(.caption).keyboardShortcut(.cancelAction)
+                    .buttonStyle(OasisButtonStyle()).font(.caption).keyboardShortcut(.cancelAction)
                 if session.sidebarSection == .bookmarks {
-                    Button("Add Bookmark", systemImage: "plus") { creating = true }.buttonStyle(.plain).labelStyle(.iconOnly)
+                    Button("Add Bookmark", systemImage: "plus") { creating = true }.buttonStyle(OasisButtonStyle()).labelStyle(.iconOnly)
                 }
             }.padding(.horizontal, 16).padding(.top, 12).padding(.bottom, 20)
             HStack(spacing: 4) {
@@ -23,7 +23,7 @@ struct LibraryPanel: View {
                     Button { session.sidebarSection = section; search = "" } label: {
                         Image(systemName: section.symbol).frame(maxWidth: .infinity).padding(.vertical, 9)
                             .background(session.sidebarSection == section ? Color.primary.opacity(0.08) : .clear, in: RoundedRectangle(cornerRadius: 8))
-                    }.buttonStyle(.plain).help(section.rawValue).accessibilityLabel(section.rawValue)
+                    }.buttonStyle(OasisButtonStyle()).help(section.rawValue).accessibilityLabel(section.rawValue)
                 }
             }.padding(.horizontal, 12)
             HStack {
@@ -35,7 +35,7 @@ struct LibraryPanel: View {
                 Text(session.sidebarSection.rawValue.uppercased()).font(.system(size: 10, weight: .semibold)).tracking(1).foregroundStyle(.secondary)
                 Spacer()
                 if session.sidebarSection == .history {
-                    Button("Clear…") { showsClearHistory = true }.font(.caption).buttonStyle(.plain).foregroundStyle(.secondary)
+                    Button("Clear…") { showsClearHistory = true }.font(.caption).buttonStyle(OasisButtonStyle()).foregroundStyle(.secondary)
                         .disabled(session.library.history.isEmpty)
                 }
             }.padding(.horizontal, 17).padding(.bottom, 6)
@@ -47,7 +47,7 @@ struct LibraryPanel: View {
             }
             Divider()
             HStack {
-                SettingsLink { Label("Settings", systemImage: "gearshape") }.buttonStyle(.plain).font(.caption)
+                SettingsLink { Label("Settings", systemImage: "gearshape") }.buttonStyle(OasisButtonStyle()).font(.caption)
                 Spacer()
                 if session.isPrivate { Image(systemName: "hand.raised.slash").help("Private Window") }
             }.foregroundStyle(.secondary).padding(16)
@@ -90,7 +90,7 @@ struct LibraryPanel: View {
             ForEach(grouped[date] ?? []) { entry in
                 Button { session.navigate(to: entry.url) } label: {
                     LibraryRow(url: entry.url, title: entry.title, subtitle: entry.url.displayHost)
-                }.buttonStyle(.plain).help(entry.url.absoluteString)
+                }.buttonStyle(OasisButtonStyle()).help(entry.url.absoluteString)
                     .contextMenu {
                         Button("Open in New Tab") { session.newTab(url: entry.url) }
                         Button("Add Bookmark") { session.library.addBookmark(url: entry.url, title: entry.title) }
@@ -113,7 +113,7 @@ struct LibraryPanel: View {
                     LibraryRow(url: bookmark.url, title: bookmark.title, subtitle: bookmark.url.displayHost)
                     if bookmark.isReadingList && !bookmark.isRead { Circle().fill(Color.oasisAccent).frame(width: 6, height: 6).padding(.trailing, 12).accessibilityLabel("Unread") }
                 }
-            }.buttonStyle(.plain).help(bookmark.url.absoluteString)
+            }.buttonStyle(OasisButtonStyle()).help(bookmark.url.absoluteString)
                 .contextMenu {
                     Button("Open in New Tab") { session.newTab(url: bookmark.url) }
                     Button("Edit…") { editing = bookmark }
