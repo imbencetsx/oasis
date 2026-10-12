@@ -115,8 +115,11 @@ enum SpoofMode {
          script.source == source, script.injectionTime == .atDocumentStart,
          !script.isForMainFrameOnly { return }
     } else if owned.isEmpty { return }
+    // WebKit's bridged array is a live view of the controller's scripts.
+    // Materialize the scripts to keep before clearing its backing storage.
+    let preserved = scripts.filter { !$0.source.hasPrefix(marker) }
     controller.removeAllUserScripts()
-    for script in scripts where !script.source.hasPrefix(marker) {
+    for script in preserved {
       controller.addUserScript(script)
     }
     if enabled {
