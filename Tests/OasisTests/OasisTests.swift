@@ -147,6 +147,55 @@ struct AddressTests {
 
 @Suite("Spoof mode scripts", .serialized)
 @MainActor struct SpoofModeTests {
+    @Test func togglingOnLoadedPageRestoresDocumentAndFrames() async throws {
+        let tab = BrowserTab(isPrivate: true)
+        defer { tab.close() }
+        tab.webView.loadHTMLString("""
+            <!doctype html><html><head><title>Spoof toggle</title></head><body>
+            <iframe srcdoc="<p>Frame</p>"></iframe>
+            </body></html>
+            """, baseURL: URL(string: "https://example.com"))
+        for _ in 0..<100 {
+            if tab.webView.title == "Spoof toggle" && !tab.webView.isLoading { break }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        try #require(tab.webView.title == "Spoof toggle" && !tab.isBlankPage)
+        _ = try await tab.webView.evaluateJavaScript("""
+            for (const w of [window, frames[0]]) {
+              w.originalHasFocus = w.Document.prototype.hasFocus;
+              w.originalHidden = Object.getOwnPropertyDescriptor(w.Document.prototype, 'hidden').get;
+              w.boundaryEvents = 0;
+              w.addEventListener('mouseout', () => w.boundaryEvents++);
+            }
+            """)
+        for _ in 0..<3 {
+            tab.setSpoofMode(true)
+            let enabled = try await tab.webView.evaluateJavaScript("""
+                [window, frames[0]].every(w => {
+                  w.dispatchEvent(new w.MouseEvent('mouseout'));
+                  return w.document.hasFocus() && !w.document.hidden &&
+                    !!w.__oasisActivityPrivacy_v2 && w.boundaryEvents === 0;
+                })
+                """) as? Bool
+            #expect(enabled == true)
+
+            tab.setSpoofMode(false)
+            let restored = try await tab.webView.evaluateJavaScript("""
+                [window, frames[0]].every(w => {
+                  w.dispatchEvent(new w.MouseEvent('mouseout'));
+                  const restored = w.Document.prototype.hasFocus === w.originalHasFocus &&
+                    Object.getOwnPropertyDescriptor(w.Document.prototype, 'hidden').get === w.originalHidden &&
+                    !Object.hasOwn(w.document, 'hidden') && !w.__oasisActivityPrivacy_v2 &&
+                    w.boundaryEvents === 1;
+                  w.boundaryEvents = 0;
+                  return restored;
+                })
+                """) as? Bool
+            #expect(restored == true)
+            #expect(tab.webView.configuration.userContentController.userScripts.isEmpty)
+        }
+    }
+
     @Test func disablingRemovesSpoofScript() {
         let controller = WKUserContentController()
         SpoofMode.configure(controller, enabled: true)
