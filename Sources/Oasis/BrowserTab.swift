@@ -6,7 +6,17 @@ import UniformTypeIdentifiers
 final class BrowserTab: NSObject, Identifiable, WKNavigationDelegate, WKUIDelegate {
     let id = UUID()
     let isPrivate: Bool
-    let webView: WKWebView
+    @ObservationIgnored private var contentView: WKWebView?
+    @ObservationIgnored private let configuration: WKWebViewConfiguration
+    @ObservationIgnored private var deferredURL: URL?
+    @ObservationIgnored private var syncTask: Task<Void, Never>?
+    @ObservationIgnored private var isClosed = false
+    @ObservationIgnored private var isHistoryNavigation = false
+    var hasWebView: Bool { contentView != nil }
+    var webView: WKWebView {
+        if let contentView { return contentView }
+        return makeWebView()
+    }
     var favicon: NSImage?
     var chromeColor: NSColor?
     var sidebarTint: NSColor? {
@@ -53,11 +63,16 @@ final class BrowserTab: NSObject, Identifiable, WKNavigationDelegate, WKUIDelega
         if configuration == nil { config.websiteDataStore = dataStore ?? (isPrivate ? .nonPersistent() : .default()) }
         config.preferences.javaScriptCanOpenWindowsAutomatically = false
         config.preferences.isElementFullscreenEnabled = true
-        coverage.prepare(config.userContentController)
-        SpoofMode.configure(config.userContentController, enabled: spoofModeEnabled)
-        webView = WKWebView(frame: .zero, configuration: config)
-        webView.obscuredContentInsets = NSEdgeInsets(top: 64, left: 0, bottom: 0, right: 0)
+        self.configuration = config
         super.init()
+    }
+
+    private func makeWebView() -> WKWebView {
+        spoofFrames.prepare(configuration.userContentController)
+        SpoofMode.configure(configuration.userContentController, enabled: spoofModeEnabled)
+        let webView = WKWebView(frame: .zero, configuration: configuration)
+        contentView = webView
+        webView.obscuredContentInsets = NSEdgeInsets(top: 64, left: 0, bottom: 0, right: 0)
         spoofFrames.attach(webView, enabled: spoofModeEnabled)
         webView.navigationDelegate = self
         webView.uiDelegate = self
@@ -65,17 +80,18 @@ final class BrowserTab: NSObject, Identifiable, WKNavigationDelegate, WKUIDelega
         webView.allowsMagnification = true
         webView.isInspectable = UserDefaults.standard.bool(forKey: "enableWebInspector")
         observations = [
-            webView.observe(\.title, options: [.new]) { [weak self] _, _ in Task { @MainActor in self?.sync() } },
-            webView.observe(\.url, options: [.new]) { [weak self] _, _ in Task { @MainActor in self?.sync() } },
-            webView.observe(\.isLoading, options: [.new]) { [weak self] _, _ in Task { @MainActor in self?.sync() } },
-            webView.observe(\.estimatedProgress, options: [.new]) { [weak self] _, _ in Task { @MainActor in self?.sync() } },
-            webView.observe(\.canGoBack, options: [.new]) { [weak self] _, _ in Task { @MainActor in self?.sync() } },
-            webView.observe(\.canGoForward, options: [.new]) { [weak self] _, _ in Task { @MainActor in self?.sync() } },
-            webView.observe(\.underPageBackgroundColor, options: [.new]) { [weak self] _, _ in Task { @MainActor in self?.sync() } },
+            webView.observe(\.title, options: [.new]) { [weak self] _, _ in self?.requestSync() },
+            webView.observe(\.url, options: [.new]) { [weak self] _, _ in self?.requestSync() },
+            webView.observe(\.isLoading, options: [.new]) { [weak self] _, _ in self?.requestSync() },
+            webView.observe(\.estimatedProgress, options: [.new]) { [weak self] _, _ in self?.requestSync() },
+            webView.observe(\.canGoBack, options: [.new]) { [weak self] _, _ in self?.requestSync() },
+            webView.observe(\.canGoForward, options: [.new]) { [weak self] _, _ in self?.requestSync() },
+            webView.observe(\.underPageBackgroundColor, options: [.new]) { [weak self] _, _ in self?.requestSync() },
             NSApp.observe(\.effectiveAppearance, options: [.new]) { [weak self] _, _ in
                 Task { @MainActor in self?.updateWebsiteAppearance() }
             }
         ]
+        return webView
     }
 
     fileprivate func updateWebsiteAppearance() {
@@ -88,19 +104,54 @@ final class BrowserTab: NSObject, Identifiable, WKNavigationDelegate, WKUIDelega
         if webView.appearance?.name != appearance?.name { webView.appearance = appearance }
     }
 
-    private func sync() {
-        // Read WebKit’s derived page color; never override it or modify the document.
-        chromeColor = isBlankPage ? nil : webView.underPageBackgroundColor
-        url = webView.url ?? url
-        updateWebsiteAppearance()
-        if isBlankPage { title = "Empty Tab" }
-        if !isBlankPage { title = webView.title.flatMap { $0.isEmpty ? nil : $0 } ?? url?.displayHost ?? "Untitled" }
-        isLoading = webView.isLoading
-        progress = webView.estimatedProgress
-        canGoBack = webView.canGoBack
-        canGoForward = webView.canGoForward
+    private nonisolated func requestSync() {
+        if Thread.isMainThread {
+            MainActor.assumeIsolated { scheduleSync() }
+        } else {
+            Task { @MainActor [weak self] in self?.scheduleSync() }
+        }
     }
+
+    private func scheduleSync() {
+        guard syncTask == nil, !isClosed else { return }
+        syncTask = Task { [weak self] in
+            guard !Task.isCancelled, let self else { return }
+            self.syncTask = nil
+            self.sync()
+        }
+    }
+
+    private func sync() {
+        guard !isClosed, let webView = contentView else { return }
+        // Read WebKit’s derived page color; never override it or modify the document.
+        let color = isBlankPage ? nil : webView.underPageBackgroundColor
+        if chromeColor != color { chromeColor = color }
+        let address = webView.url ?? url
+        if url != address { url = address; updateWebsiteAppearance() }
+        let pageTitle = isBlankPage ? "Empty Tab" : webView.title.flatMap { $0.isEmpty ? nil : $0 } ?? url?.displayHost ?? "Untitled"
+        if title != pageTitle { title = pageTitle }
+        if isLoading != webView.isLoading { isLoading = webView.isLoading }
+        if progress != webView.estimatedProgress { progress = webView.estimatedProgress }
+        if canGoBack != webView.canGoBack { canGoBack = webView.canGoBack }
+        if canGoForward != webView.canGoForward { canGoForward = webView.canGoForward }
+    }
+
+    func prepareRestoration(url: URL?) {
+        guard let url else { return }
+        self.url = url
+        isBlankPage = url.absoluteString == "about:blank"
+        title = isBlankPage ? "Empty Tab" : url.displayHost
+        deferredURL = url
+    }
+
+    func loadIfNeeded() {
+        if let deferredURL { load(deferredURL) }
+    }
+
     func load(_ url: URL) {
+        guard !isClosed else { return }
+        deferredURL = nil
+        isHistoryNavigation = false
         self.url = url; isBlankPage = url.absoluteString == "about:blank"; errorMessage = nil; showsReader = false; readerContent = nil
         updateWebsiteAppearance()
         if isBlankPage { chromeColor = nil }
@@ -113,6 +164,7 @@ final class BrowserTab: NSObject, Identifiable, WKNavigationDelegate, WKUIDelega
     }
     func setSpoofMode(_ enabled: Bool) {
         spoofModeEnabled = enabled
+        guard let webView = contentView else { return }
         SpoofMode.configure(webView.configuration.userContentController, enabled: enabled)
         spoofFrames.apply(enabled: enabled)
         applySpoofModeToDocument()
@@ -123,19 +175,27 @@ final class BrowserTab: NSObject, Identifiable, WKNavigationDelegate, WKUIDelega
         webView.evaluateJavaScript(spoofModeEnabled ? SpoofMode.source : SpoofMode.restoreSource) { _, _ in }
     }
     func setTopInset(_ topInset: CGFloat) {
-        webView.obscuredContentInsets = NSEdgeInsets(top: topInset, left: 0, bottom: 0, right: 0)
+        let insets = NSEdgeInsets(top: topInset, left: 0, bottom: 0, right: 0)
+        if webView.obscuredContentInsets.top != topInset { webView.obscuredContentInsets = insets }
     }
-    func goBack() { showsReader = false; errorMessage = nil; webView.goBack() }
-    func goForward() { showsReader = false; errorMessage = nil; webView.goForward() }
-    func reload() { errorMessage = nil; webView.reload() }
+    func goBack() { showsReader = false; errorMessage = nil; isHistoryNavigation = true; webView.goBack() }
+    func goForward() { showsReader = false; errorMessage = nil; isHistoryNavigation = true; webView.goForward() }
+    func reload() {
+        errorMessage = nil
+        if deferredURL != nil { loadIfNeeded() } else { webView.reload() }
+    }
     func stop() { webView.stopLoading() }
     func setZoom(_ value: Double) { zoom = min(3, max(0.5, value)); webView.pageZoom = zoom }
     func close() {
+        guard !isClosed else { return }
+        isClosed = true
+        deferredURL = nil
+        syncTask?.cancel(); syncTask = nil
         spoofFrames.close()
         faviconTask?.cancel()
-        webView.stopLoading()
-        webView.pauseAllMediaPlayback(completionHandler: nil)
-        webView.navigationDelegate = nil; webView.uiDelegate = nil
+        contentView?.stopLoading()
+        contentView?.pauseAllMediaPlayback(completionHandler: nil)
+        contentView?.navigationDelegate = nil; contentView?.uiDelegate = nil
         observations.removeAll()
     }
     func find(backwards: Bool = false) {
@@ -201,12 +261,18 @@ final class BrowserTab: NSObject, Identifiable, WKNavigationDelegate, WKUIDelega
     }
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
         isBlankPage = webView.url?.absoluteString == "about:blank"
-        applySpoofModeToDocument()
+        if isHistoryNavigation {
+            // Cached pages do not rerun document-start scripts. Reconcile their
+            // frame tree explicitly; page-world lifecycle suppression can also
+            // prevent the isolated world's pageshow listener from receiving it.
+            applySpoofModeToDocument()
+            spoofFrames.refreshCachedFrames()
+        }
+        isHistoryNavigation = false
         sync()
     }
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         isBlankPage = webView.url?.absoluteString == "about:blank"
-        applySpoofModeToDocument()
         sync()
         loadFavicon()
         if !isPrivate, let url, url.isWebURL { session?.library.recordVisit(url: url, title: title) }
@@ -228,9 +294,15 @@ final class BrowserTab: NSObject, Identifiable, WKNavigationDelegate, WKUIDelega
             do {
                 let (data, response) = try await client.data(for: URLRequest(url: iconURL, timeoutInterval: 8))
                 guard !Task.isCancelled, self.url == pageURL, data.count <= 1_000_000,
-                      let response = response as? HTTPURLResponse, (200..<300).contains(response.statusCode),
-                      let image = NSImage(data: data) else { return }
-                favicon = image
+                      let response = response as? HTTPURLResponse, (200..<300).contains(response.statusCode) else { return }
+                let thumbnail = await Task.detached(priority: .utility) { FaviconThumbnail.decode(data) }.value
+                guard !Task.isCancelled, self.url == pageURL else { return }
+                if let thumbnail {
+                    favicon = NSImage(cgImage: thumbnail, size: NSSize(width: thumbnail.width, height: thumbnail.height))
+                } else {
+                    // Preserve vector/other formats supported by AppKit but not ImageIO.
+                    favicon = NSImage(data: data)
+                }
             } catch { /* Sites without an icon keep the document fallback. */ }
         }
     }
@@ -246,6 +318,9 @@ final class BrowserTab: NSObject, Identifiable, WKNavigationDelegate, WKUIDelega
 
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
                  decisionHandler: @escaping @MainActor @Sendable (WKNavigationActionPolicy) -> Void) {
+        if navigationAction.targetFrame?.isMainFrame == true {
+            isHistoryNavigation = navigationAction.navigationType == .backForward
+        }
         guard let url = navigationAction.request.url else { decisionHandler(.cancel); return }
         let scheme = url.scheme?.lowercased() ?? ""
         if !["http", "https", "about", "file", "data", "blob"].contains(scheme) {
@@ -351,7 +426,6 @@ struct WebContentView: NSViewRepresentable {
         return tab.webView
     }
     func updateNSView(_ nsView: WKWebView, context: Context) {
-        roundCorners(nsView)
         tab.updateWebsiteAppearance()
     }
     private func roundCorners(_ webView: WKWebView) {

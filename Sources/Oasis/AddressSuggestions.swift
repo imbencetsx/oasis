@@ -1,6 +1,6 @@
 import SwiftUI
 
-struct AddressSuggestion: Identifiable {
+struct AddressSuggestion: Identifiable, Sendable {
   let url: URL
   let title: String
   let symbol: String
@@ -17,43 +17,45 @@ enum AddressSuggestions {
     let hostQuery = needle.replacingOccurrences(of: "https://", with: "")
       .replacingOccurrences(of: "http://", with: "")
       .replacingOccurrences(of: "www.", with: "")
-    let commonSites = [
-      ("YouTube", "youtube.com"), ("GitHub", "github.com"), ("Wikipedia", "wikipedia.org"),
-      ("Google", "google.com"), ("Reddit", "reddit.com"), ("Apple", "apple.com"),
-      ("Instagram", "instagram.com"), ("Amazon", "amazon.com"), ("DuckDuckGo", "duckduckgo.com"),
-      ("Netflix", "netflix.com"), ("ChatGPT", "chatgpt.com"),
-      ("Stack Overflow", "stackoverflow.com"),
-    ]
-    let candidates =
-      bookmarks.map { AddressSuggestion(url: $0.url, title: $0.title, symbol: "bookmark") }
-      + history.prefix(1000).map {
-        AddressSuggestion(url: $0.url, title: $0.title, symbol: "clock")
-      }
-      + commonSites.compactMap { title, host -> AddressSuggestion? in
-        guard let url = URL(string: "https://\(host)/") else { return nil }
-        return AddressSuggestion(url: url, title: title, symbol: "globe")
-      }
     var seen = Set<String>()
-    return candidates.enumerated().compactMap {
-      index, candidate -> (AddressSuggestion, Int, Int)? in
-      guard candidate.url.isWebURL else { return nil }
-      let host = candidate.url.displayHost.lowercased()
-      let title = candidate.title.lowercased()
-      let address = candidate.url.absoluteString.lowercased()
+    var ranked = [[AddressSuggestion]](repeating: [], count: 3)
+    func offer(url: URL, title: String, symbol: String) {
+      guard url.isWebURL else { return }
+      let host = url.displayHost.lowercased()
+      let label = title.lowercased()
+      let address = url.absoluteString.lowercased()
       let score: Int
-      if host.hasPrefix(hostQuery) {
-        score = 0
-      } else if title.hasPrefix(needle) {
-        score = 1
-      } else if host.contains(hostQuery) || title.contains(needle) || address.contains(needle) {
-        score = 2
-      } else {
-        return nil
-      }
-      guard seen.insert(candidate.id).inserted else { return nil }
-      return (candidate, score, index)
-    }.sorted { a, b in a.1 == b.1 ? a.2 < b.2 : a.1 < b.1 }
-      .prefix(6).map { $0.0 }
+      if host.hasPrefix(hostQuery) { score = 0 }
+      else if label.hasPrefix(needle) { score = 1 }
+      else if host.contains(hostQuery) || label.contains(needle) || address.contains(needle) { score = 2 }
+      else { return }
+      guard seen.insert(url.absoluteString).inserted, ranked[score].count < 6 else { return }
+      ranked[score].append(AddressSuggestion(url: url, title: title, symbol: symbol))
+    }
+    // Preserve bookmark/recent-history precedence without allocating and sorting
+    // every candidate when only six results can be displayed.
+    for bookmark in bookmarks {
+      offer(url: bookmark.url, title: bookmark.title, symbol: "bookmark")
+      if ranked[0].count == 6 { return ranked[0] }
+    }
+    for visit in history.prefix(1000) {
+      offer(url: visit.url, title: visit.title, symbol: "clock")
+      if ranked[0].count == 6 { return ranked[0] }
+    }
+    for site in commonSites {
+      offer(url: site.url, title: site.title, symbol: site.symbol)
+      if ranked[0].count == 6 { return ranked[0] }
+    }
+    return Array(ranked.joined().prefix(6))
+  }
+
+  private static let commonSites: [AddressSuggestion] = [
+    ("YouTube", "youtube.com"), ("GitHub", "github.com"), ("Wikipedia", "wikipedia.org"),
+    ("Google", "google.com"), ("Reddit", "reddit.com"), ("Apple", "apple.com"),
+    ("Instagram", "instagram.com"), ("Amazon", "amazon.com"), ("DuckDuckGo", "duckduckgo.com"),
+    ("Netflix", "netflix.com"), ("ChatGPT", "chatgpt.com"), ("Stack Overflow", "stackoverflow.com"),
+  ].compactMap { title, host in
+    URL(string: "https://\(host)/").map { AddressSuggestion(url: $0, title: title, symbol: "globe") }
   }
 
   static func moveSelection(

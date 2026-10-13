@@ -132,6 +132,93 @@ import WebKit
             """) as? Bool
         #expect(restored == true)
     }
+
+    @Test func readdingListenersWhileOffDoesNotDuplicateCallbacks() async throws {
+        let tab = BrowserTab(isPrivate: true, spoofModeEnabled: true)
+        defer { tab.close() }
+        tab.webView.loadHTMLString("<title>Listener identity</title><input id='field'>", baseURL: nil)
+        for _ in 0..<100 {
+            if tab.webView.title == "Listener identity" && !tab.webView.isLoading { break }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        _ = try await tab.webView.evaluateJavaScript("window.count=0;window.listener=()=>count++;field.addEventListener('blur',listener);")
+        for _ in 0..<3 {
+            tab.setSpoofMode(false)
+            let count = try await tab.webView.evaluateJavaScript("count=0;field.addEventListener('blur',listener);field.dispatchEvent(new Event('blur'));count") as? Int
+            #expect(count == 1)
+            tab.setSpoofMode(true)
+        }
+        tab.setSpoofMode(false)
+        let removed = try await tab.webView.evaluateJavaScript("count=0;field.removeEventListener('blur',listener);field.dispatchEvent(new Event('blur'));count") as? Int
+        #expect(removed == 0)
+    }
+
+    @Test func backForwardNavigationUsesTheCurrentSpoofPreference() async throws {
+        let fixture = CrossOriginFixture()
+        let config = WKWebViewConfiguration()
+        config.websiteDataStore = .nonPersistent()
+        config.setURLSchemeHandler(fixture, forURLScheme: "oasis-fixture")
+        let tab = BrowserTab(isPrivate: true, configuration: config, spoofModeEnabled: true)
+        fixture.tab = tab
+        tab.webView.navigationDelegate = fixture
+        defer { tab.close() }
+        func waitFor(_ title: String) async throws {
+            for _ in 0..<100 {
+                if tab.webView.title == title && !tab.webView.isLoading { break }
+                try await Task.sleep(for: .milliseconds(25))
+            }
+            try #require(tab.webView.title == title)
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        tab.load(URL(string: "oasis-fixture://pages/first")!)
+        try await waitFor("Cached first")
+        tab.load(URL(string: "oasis-fixture://pages/second")!)
+        try await waitFor("Cached second")
+        tab.setSpoofMode(false)
+        tab.goBack()
+        try await waitFor("Cached first")
+        #expect(try await tab.webView.evaluateJavaScript("!!window.__oasisActivityPrivacy_v2") as? Bool == false)
+        for _ in 0..<100 {
+            _ = try await tab.webView.evaluateJavaScript("frames[0].postMessage('querySpoof','*');")
+            if try await tab.webView.evaluateJavaScript("childSpoof") as? Bool == false { break }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        #expect(try await tab.webView.evaluateJavaScript("childSpoof") as? Bool == false)
+        tab.setSpoofMode(true)
+        tab.goForward()
+        try await waitFor("Cached second")
+        #expect(try await tab.webView.evaluateJavaScript("document.hasFocus() && !document.hidden && !!window.__oasisActivityPrivacy_v2") as? Bool == true)
+        for _ in 0..<100 {
+            _ = try await tab.webView.evaluateJavaScript("frames[0].postMessage('querySpoof','*');")
+            if try await tab.webView.evaluateJavaScript("childSpoof") as? Bool == true { break }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        #expect(try await tab.webView.evaluateJavaScript("childSpoof") as? Bool == true)
+    }
+
+    @Test func sharedPopupConfigurationsKeepOneTrackerAndSurviveClosingTheOpener() async throws {
+        let first = BrowserTab(isPrivate: true, spoofModeEnabled: true)
+        let controller = first.webView.configuration.userContentController
+        let second = BrowserTab(isPrivate: true, configuration: first.webView.configuration, spoofModeEnabled: true)
+        defer { first.close(); second.close() }
+        #expect(second.webView.configuration.userContentController === controller)
+        #expect(controller.userScripts.count == 2)
+        second.webView.loadHTMLString("<title>Popup</title><iframe srcdoc='<p>Child</p>'></iframe>", baseURL: nil)
+        for _ in 0..<100 {
+            if second.webView.title == "Popup" && !second.webView.isLoading { break }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        first.close()
+        #expect(controller.userScripts.count == 2)
+        for enabled in [false, true, false] {
+            second.setSpoofMode(enabled)
+            try await Task.sleep(for: .milliseconds(25))
+            let active = try await second.webView.evaluateJavaScript("!!window.__oasisActivityPrivacy_v2 && !!frames[0].__oasisActivityPrivacy_v2") as? Bool
+            #expect(active == enabled)
+        }
+        second.close()
+        #expect(controller.userScripts.isEmpty)
+    }
 }
 
 @MainActor private final class CrossOriginFixture: NSObject, WKURLSchemeHandler, WKNavigationDelegate {
@@ -139,7 +226,18 @@ import WebKit
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) { tab?.webView(webView, didCommit: navigation) }
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { tab?.webView(webView, didFinish: navigation) }
     func webView(_ webView: WKWebView, start urlSchemeTask: any WKURLSchemeTask) {
-        let data = Data("<title>Cross origin</title><p>Different origin</p>".utf8)
+        let title = urlSchemeTask.request.url?.lastPathComponent == "child" ? "Cross origin" : "Cached " + (urlSchemeTask.request.url?.lastPathComponent ?? "")
+        let content = title == "Cross origin" ? """
+            <script>addEventListener('message', e => {
+              if(e.data === 'querySpoof') parent.postMessage({active: !!window.__oasisActivityPrivacy_v2}, '*');
+            });</script>
+            """ : """
+            <iframe src='oasis-fixture://child-origin/child'></iframe>
+            <script>window.childSpoof=null;addEventListener('message',e=>{
+              if(typeof e.data?.active === 'boolean') childSpoof=e.data.active;
+            });</script>
+            """
+        let data = Data("<title>\(title)</title><p>Different origin</p>\(content)".utf8)
         urlSchemeTask.didReceive(URLResponse(url: urlSchemeTask.request.url!, mimeType: "text/html",
             expectedContentLength: data.count, textEncodingName: "utf-8"))
         urlSchemeTask.didReceive(data)

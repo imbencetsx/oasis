@@ -4,17 +4,19 @@ import WebKit
 /// This does not alter HTML/CSS, synthesize input, or conceal network identity.
 enum SpoofMode {
   // Keep ownership compatible with earlier versions when replacing installed scripts.
+  static let version = 4
+  static let stateKey = "__oasisActivityPrivacy_v2"
   static let marker = "/* Oasis activity privacy"
   static let source = """
-    /* Oasis activity privacy v3 */
+    /* Oasis activity privacy v\(version) */
     (() => {
-      const key = '__oasisActivityPrivacy_v2';
-      function install(w) {
+      const key = '\(stateKey)';
+      function install(w, traverse = true) {
         try {
           const d = w.document;
           const existing = w[key];
-          if (existing?.document === d && existing.version === 3) {
-            existing.repair();
+          if (existing?.document === d && existing.version === \(version)) {
+            if (!traverse) return;
           } else {
             // Upgrade a live document from the previous implementation cleanly.
             existing?.restore();
@@ -54,14 +56,12 @@ enum SpoofMode {
                 event.stopPropagation();
               }
             }
-            function frameLoaded(event) {
-              if (event.target?.tagName === 'IFRAME' || event.target?.tagName === 'FRAME') {
-                try { install(event.target.contentWindow); } catch (_) {}
-              }
-            }
             const blocked = new Set([...visibility, ...boundary, ...focus]);
             const eventProto = w.EventTarget.prototype;
-            const nativeAdd = eventProto.addEventListener;
+            const nativeAdd = w.__oasisActivityNativeAdd ?? eventProto.addEventListener;
+            Object.defineProperty(w, '__oasisActivityNativeAdd', {
+              value: nativeAdd, configurable: true
+            });
             const nativeRemove = w.__oasisActivityNativeRemove ?? eventProto.removeEventListener;
             Object.defineProperty(w, '__oasisActivityNativeRemove', {
               value: nativeRemove, configurable: true
@@ -137,26 +137,15 @@ enum SpoofMode {
                 if (!descriptor?.get || !descriptor.configurable) continue;
                 patch(frameProto, name, { get: function() {
                   const value = descriptor.get.call(this);
-                  try { install(name === 'contentWindow' ? value : value?.defaultView); } catch (_) {}
+                  try { install(name === 'contentWindow' ? value : value?.defaultView, false); } catch (_) {}
                   return value;
                 }});
               }
             }
-            const observer = new w.MutationObserver(records => {
-              for (const record of records) for (const node of record.addedNodes) {
-                if (node.nodeType !== 1) continue;
-                const frames = node.matches('iframe,frame') ? [node] : node.querySelectorAll('iframe,frame');
-                for (const frame of frames) { try { install(frame.contentWindow); } catch (_) {} }
-              }
-            });
-            observer.observe(d, {childList: true, subtree: true});
             const types = [...visibility, ...boundary, ...focus];
             for (const type of types) nativeAdd.call(w, type, suppress, true);
-            d.addEventListener('load', frameLoaded, true);
-            const state = { version: 3, document: d, repair, restore() {
-              observer.disconnect();
+            const state = { version: \(version), document: d, repair, restore() {
               for (const type of types) nativeRemove.call(w, type, suppress, true);
-              d.removeEventListener('load', frameLoaded, true);
               for (const reference of handlers) {
                 const target = reference.deref();
                 if (!target) continue;
@@ -167,9 +156,9 @@ enum SpoofMode {
               }
               for (const p of [...patches].reverse()) {
                 try {
-                  // Existing wrapped registrations need this identity adapter after off;
-                  // it removes both original and wrapped callbacks and suppresses nothing.
-                  if (p.object === eventProto && p.name === 'removeEventListener') continue;
+                  // Keep callback identity stable across toggles so re-adding a listener
+                  // while off cannot register its original alongside its wrapper.
+                  if (p.object === eventProto && (p.name === 'addEventListener' || p.name === 'removeEventListener')) continue;
                   if (p.original) Object.defineProperty(p.object, p.name, p.original);
                   else delete p.object[p.name];
                 } catch (_) {}
@@ -180,6 +169,7 @@ enum SpoofMode {
             repair();
           }
           // An inaccessible frame must not prevent subsequent frames from being processed.
+          if (!traverse) return;
           for (let i = 0; i < w.frames.length; i++) {
             try { install(w.frames[i]); } catch (_) {}
           }
@@ -191,10 +181,11 @@ enum SpoofMode {
 
   static let restoreSource = """
     (() => {
-      function restore(w) {
+      function restore(w, traverse = true) {
         try {
-          w.__oasisActivityPrivacy_v2?.restore();
+          w['\(stateKey)']?.restore();
           w.__oasisRestoreActivityPrivacy_v1?.();
+          if (!traverse) return;
           for (let i = 0; i < w.frames.length; i++) {
             try { restore(w.frames[i]); } catch (_) {}
           }
@@ -203,6 +194,11 @@ enum SpoofMode {
       restore(window);
     })();
     """
+
+  // Native frame identities already enumerate every document. Do not re-walk
+  // descendants for each frame, which would repeatedly visit nested frames.
+  static let frameSource = source.replacingOccurrences(of: "install(window);", with: "install(window, false);")
+  static let frameRestoreSource = restoreSource.replacingOccurrences(of: "restore(window);", with: "restore(window, false);")
 
   @MainActor static func configure(_ controller: WKUserContentController, enabled: Bool) {
     let scripts = controller.userScripts

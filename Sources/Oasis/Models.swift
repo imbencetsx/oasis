@@ -1,13 +1,13 @@
 import Foundation
 
-struct HistoryEntry: Codable, Identifiable, Equatable {
+struct HistoryEntry: Codable, Sendable, Identifiable, Equatable {
     var id = UUID()
     var url: URL
     var title: String
     var visitedAt = Date()
 }
 
-struct Bookmark: Codable, Identifiable, Equatable {
+struct Bookmark: Codable, Sendable, Identifiable, Equatable {
     var id = UUID()
     var url: URL
     var title: String
@@ -17,28 +17,26 @@ struct Bookmark: Codable, Identifiable, Equatable {
     var createdAt = Date()
 }
 
-struct SavedTab: Codable, Hashable {
+struct SavedTab: Codable, Sendable, Hashable {
     var url: URL?
     var isPinned: Bool
     var spaceID: UUID? = nil
 }
 
 // Decode previous Essentials once so their saved links can become bookmarks.
-struct LegacyEssentialLink: Codable {
-    var id = UUID()
+struct LegacyEssentialLink: Codable, Sendable {
     var url: URL
     var title: String
-    var faviconData: Data? = nil
 }
 
-struct SavedWindow: Codable, Hashable {
+struct SavedWindow: Codable, Sendable, Hashable {
     var tabs: [SavedTab]
     var selectedIndex: Int
     var selectedSpaceID: UUID? = nil
     var selectedIndicesBySpace: [String: Int]? = nil
 }
 
-struct BrowserSpace: Codable, Identifiable, Hashable {
+struct BrowserSpace: Codable, Sendable, Identifiable, Hashable {
     var id = UUID()
     var name: String
     var emoji: String
@@ -53,7 +51,7 @@ struct BrowserSpace: Codable, Identifiable, Hashable {
     }
 }
 
-struct LibraryData: Codable {
+struct LibraryData: Codable, Sendable {
     var history: [HistoryEntry] = []
     var bookmarks: [Bookmark] = []
     var windows: [String: SavedWindow] = [:]

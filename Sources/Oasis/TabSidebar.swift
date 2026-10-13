@@ -9,7 +9,8 @@ struct TabSidebar: View {
   @Environment(\.accessibilityDifferentiateWithoutColor) private var differentiateWithoutColor
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 0) {
+    let unpinnedTabs = session.unpinnedTabs
+    return VStack(alignment: .leading, spacing: 0) {
       currentSpaceHeader
       ScrollView {
         LazyVStack(spacing: 3) {
@@ -23,7 +24,7 @@ struct TabSidebar: View {
             }
             .buttonStyle(OasisButtonStyle())
             .foregroundStyle(.secondary)
-            .disabled(session.unpinnedTabs.isEmpty)
+            .disabled(unpinnedTabs.isEmpty)
             .help("Close unpinned tabs in \(session.currentSpace.name)")
           }.padding(.horizontal, 4).padding(.vertical, 1)
           Button { session.openNewTabSearch() } label: {
@@ -32,7 +33,7 @@ struct TabSidebar: View {
               .frame(maxWidth: .infinity, minHeight: 32, alignment: .leading)
               .padding(.leading, 11).contentShape(Rectangle())
           }.buttonStyle(OasisButtonStyle()).foregroundStyle(.secondary)
-          ForEach(session.unpinnedTabs) { tab in tabRow(tab) }
+          ForEach(unpinnedTabs) { tab in tabRow(tab) }
         }.padding(.horizontal, 10).padding(.bottom, 12)
       }.scrollIndicators(.hidden)
       spaceSwitcher
@@ -106,7 +107,8 @@ struct TabSidebar: View {
   }
 
   private func tabRow(_ tab: BrowserTab) -> some View {
-    SidebarTabRow(tab: tab, selection: $session.selectedID) { session.closeTab(tab.id) }
+    SidebarTabRow(tab: tab, isSelected: session.selectedID == tab.id,
+                  onSelect: { session.select(tab.id) }, onClose: { session.closeTab(tab.id) })
       .draggable(tab.id.uuidString)
       .dropDestination(for: String.self) { values, _ in
         guard let value = values.first, let id = UUID(uuidString: value) else { return false }
@@ -125,7 +127,7 @@ struct TabSidebar: View {
         Divider()
         Button("Close Tab") { session.closeTab(tab.id) }
         Button("Close Other Tabs") {
-          for other in session.currentTabs where other.id != tab.id && !other.isPinned { session.closeTab(other.id) }
+          session.closeTabs(Set(session.currentTabs.filter { $0.id != tab.id && !$0.isPinned }.map(\.id)))
         }
       }
   }
@@ -182,21 +184,14 @@ private struct SpaceEditor: View {
 /// The caller owns selection; hover is transient presentation state local to the row.
 struct SidebarTabRow: View {
   let tab: BrowserTab
-  @Binding var selection: UUID?
+  let isSelected: Bool
+  let onSelect: () -> Void
   let onClose: () -> Void
   @State private var hovering = false
   @Environment(\.accessibilityDifferentiateWithoutColor) private var differentiateWithoutColor
-  private var isSelected: Bool { selection == tab.id }
-  init(tab: BrowserTab, selection: Binding<UUID?>, onClose: @escaping () -> Void) {
-    self.tab = tab
-    _selection = selection
-    self.onClose = onClose
-  }
   var body: some View {
     ZStack(alignment: .trailing) {
-      Button {
-        selection = tab.id
-      } label: {
+      Button(action: onSelect) {
         HStack(spacing: 9) {
           if tab.isLoading {
             ProgressView().controlSize(.mini).frame(width: 16)

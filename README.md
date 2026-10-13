@@ -58,7 +58,7 @@ The current space’s emoji and name sit directly below the sidebar’s top bar.
 
 Pinned tabs sit above the divider. **↓ Clear** closes only the current space’s unpinned tabs below it; pinned tabs and other spaces stay open. Normal tabs can be recovered with **Reopen Closed Tab** (⇧⌘T). Deleting a space moves its tabs into another space rather than closing them.
 
-Space names and emojis are saved for normal windows. Tabs and the selected space restore when session restoration is enabled. Private-window spaces and tabs stay within that window and are never saved. Previously saved Essentials links are preserved in Bookmarks.
+Space names and emojis are saved for normal windows. Tabs and the selected space restore when session restoration is enabled. Restored background tabs keep their saved URLs and load when selected, so startup does not load every space at once. Private-window spaces and tabs stay within that window and are never saved. Previously saved Essentials links are preserved in Bookmarks.
 
 ## Interaction motion
 
@@ -110,6 +110,12 @@ The improved brief is saved in [docs/APP_PROMPT.md](docs/APP_PROMPT.md).
 
 Toggle **Spoof Mode** using the mask button beside Downloads, the page-actions menu, or Settings → Privacy. The mask fills and gains a neutral highlight while enabled. Off by default, it persists locally and applies across windows. A document-start script in every frame reports `hidden = false`, `visibilityState = "visible"`, and `hasFocus() = true`. It suppresses visibility/lifecycle, focus/blur (including controls), mouse/pointer boundary, pointer-cancellation, and touch-cancellation events. Listener and property-handler guards also cover detached elements and shadow roots. Clicks, text input, and native control focus remain functional; websites that depend on focus or hover event handlers may behave differently. The script does not generate input, change page styles, alter the user agent, or silence unrelated console logs.
 
-An isolated-world frame registry uses WebKit frame identities to apply live toggles to existing cross-origin, sandboxed, nested, and dynamically loaded frames. Same-origin frame accessors also initialize accessible blank frames before a parent inspects them. Disabling restores activity accessors and handlers and removes suppression listeners. A passive callback-identity adapter remains so listeners registered while enabled can still be removed correctly while off. Frame registration remains active while off to support subsequent live toggles, and is removed when the tab closes.
+An isolated-world frame registry uses WebKit frame identities to apply live toggles to existing cross-origin, sandboxed, nested, and dynamically loaded frames. Same-origin frame accessors also initialize accessible blank frames before a parent inspects them. Disabling restores activity accessors and handlers and removes suppression listeners. Passive add/remove callback-identity adapters remain so listeners registered while enabled can still be re-added and removed correctly while off. Frame registration remains active while off to support subsequent live toggles, and is removed when the tab closes.
 
 This is best effort, not an undetectability guarantee. Enabling on an already loaded document cannot erase earlier observations or native references that a site already saved. Sites can still infer activity through timing, network requests, CSS hover/focus state, polling other APIs, or deliberate modification of the page-world patches. Reload with Spoof Mode enabled for document-start coverage.
+
+## Performance
+
+Restored tabs create their web views on demand. Regular library encoding and atomic writes use a serial background queue; quitting flushes the latest snapshot after pending writes. Window snapshots do not invalidate history/bookmark lists, WebKit property notifications are coalesced, and tab clearing saves one snapshot for the batch. Local suggestions retain their ranking while avoiding a full candidate sort, bitmap favicons are decoded off the UI thread at a maximum of 64 pixels, and grain updates stay within the backdrop view.
+
+Spoof Mode uses one tracker per shared content controller. Reading an already configured iframe does not reinstall its patches; ordinary DOM updates are not scanned for frames. Document-start injection, native frame registration, and synchronous frame accessors retain iframe coverage. The review, measurements, and remaining limits are recorded in [the performance review](docs/PERFORMANCE_REVIEW.md).
