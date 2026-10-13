@@ -74,6 +74,10 @@ struct BrowserCommands: Commands {
         }
         CommandGroup(after: .textEditing) {
             Divider()
+            Button(ClipboardTyping.shared.isTyping ? "Stop Typing Clipboard" : "Type Clipboard") {
+                ClipboardTyping.shared.toggle(spoofModeEnabled: BrowserLibrary.shared.spoofModeEnabled)
+            }.keyboardShortcut("9", modifiers: .command)
+                .disabled(session == nil || !BrowserLibrary.shared.spoofModeEnabled)
             Button("Find on Page…") { session?.showsFind = true }.keyboardShortcut("f").disabled(session?.selectedTab?.isBlankPage ?? true)
         }
         CommandGroup(after: .toolbar) {

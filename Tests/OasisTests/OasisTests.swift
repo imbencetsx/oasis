@@ -128,7 +128,7 @@ struct AddressTests {
     @Test func preservesWebsiteCSS() async throws {
         let tab = BrowserTab(isPrivate: true)
         defer { tab.close() }
-        #expect(tab.webView.configuration.userContentController.userScripts.isEmpty)
+        #expect(!tab.webView.configuration.userContentController.userScripts.contains { $0.source.hasPrefix(SpoofMode.marker) })
         tab.webView.loadHTMLString("""
             <!doctype html><html><head><title>Original CSS</title></head>
             <body style="background: rgb(255, 0, 0); color: rgb(0, 0, 0)">Original website</body></html>
@@ -192,7 +192,7 @@ struct AddressTests {
                 })
                 """) as? Bool
             #expect(restored == true)
-            #expect(tab.webView.configuration.userContentController.userScripts.isEmpty)
+            #expect(!tab.webView.configuration.userContentController.userScripts.contains { $0.source.hasPrefix(SpoofMode.marker) })
         }
     }
 

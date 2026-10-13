@@ -20,17 +20,46 @@ struct Bookmark: Codable, Identifiable, Equatable {
 struct SavedTab: Codable, Hashable {
     var url: URL?
     var isPinned: Bool
+    var spaceID: UUID? = nil
+}
+
+// Decode previous Essentials once so their saved links can become bookmarks.
+struct LegacyEssentialLink: Codable {
+    var id = UUID()
+    var url: URL
+    var title: String
+    var faviconData: Data? = nil
 }
 
 struct SavedWindow: Codable, Hashable {
     var tabs: [SavedTab]
     var selectedIndex: Int
+    var selectedSpaceID: UUID? = nil
+    var selectedIndicesBySpace: [String: Int]? = nil
+}
+
+struct BrowserSpace: Codable, Identifiable, Hashable {
+    var id = UUID()
+    var name: String
+    var emoji: String
+
+    static let defaults = [
+        BrowserSpace(id: UUID(uuidString: "24B46DB5-AAD0-4D1B-BDB8-1C3802A00001")!, name: "The Garden", emoji: "🌱"),
+        BrowserSpace(id: UUID(uuidString: "24B46DB5-AAD0-4D1B-BDB8-1C3802A00002")!, name: "Cloud", emoji: "☁️")
+    ]
+
+    static func isValidEmoji(_ value: String) -> Bool {
+        value.count == 1 && value.unicodeScalars.contains { $0.properties.isEmoji && $0.value > 0x7F }
+    }
 }
 
 struct LibraryData: Codable {
     var history: [HistoryEntry] = []
     var bookmarks: [Bookmark] = []
     var windows: [String: SavedWindow] = [:]
+    // Optional so libraries from earlier versions continue to decode.
+    var essentials: [LegacyEssentialLink]? = nil
+    var spaces: [BrowserSpace]? = nil
 }
 
 enum SearchEngine: String, CaseIterable, Identifiable {
