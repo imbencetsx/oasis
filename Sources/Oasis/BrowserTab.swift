@@ -31,6 +31,7 @@ final class BrowserTab: NSObject, Identifiable, WKNavigationDelegate, WKUIDelega
     var canGoBack = false
     var canGoForward = false
     var isPinned = false
+    var spaceID: UUID?
     var errorMessage: String?
     var zoom = 1.0
     var findText = ""
@@ -41,18 +42,23 @@ final class BrowserTab: NSObject, Identifiable, WKNavigationDelegate, WKUIDelega
     @ObservationIgnored private var faviconTask: Task<Void, Never>?
     @ObservationIgnored private var observations: [NSKeyValueObservation] = []
     @ObservationIgnored private var spoofModeEnabled: Bool
+    @ObservationIgnored private let spoofFrames: SpoofFrameCoverage
 
     init(isPrivate: Bool, configuration: WKWebViewConfiguration? = nil, dataStore: WKWebsiteDataStore? = nil, spoofModeEnabled: Bool = false) {
         self.isPrivate = isPrivate
         self.spoofModeEnabled = spoofModeEnabled
+        let coverage = SpoofFrameCoverage()
+        spoofFrames = coverage
         let config = configuration ?? WKWebViewConfiguration()
         if configuration == nil { config.websiteDataStore = dataStore ?? (isPrivate ? .nonPersistent() : .default()) }
         config.preferences.javaScriptCanOpenWindowsAutomatically = false
         config.preferences.isElementFullscreenEnabled = true
+        coverage.prepare(config.userContentController)
         SpoofMode.configure(config.userContentController, enabled: spoofModeEnabled)
         webView = WKWebView(frame: .zero, configuration: config)
         webView.obscuredContentInsets = NSEdgeInsets(top: 64, left: 0, bottom: 0, right: 0)
         super.init()
+        spoofFrames.attach(webView, enabled: spoofModeEnabled)
         webView.navigationDelegate = self
         webView.uiDelegate = self
         webView.allowsBackForwardNavigationGestures = true
@@ -108,6 +114,7 @@ final class BrowserTab: NSObject, Identifiable, WKNavigationDelegate, WKUIDelega
     func setSpoofMode(_ enabled: Bool) {
         spoofModeEnabled = enabled
         SpoofMode.configure(webView.configuration.userContentController, enabled: enabled)
+        spoofFrames.apply(enabled: enabled)
         applySpoofModeToDocument()
     }
     private func applySpoofModeToDocument() {
@@ -124,6 +131,7 @@ final class BrowserTab: NSObject, Identifiable, WKNavigationDelegate, WKUIDelega
     func stop() { webView.stopLoading() }
     func setZoom(_ value: Double) { zoom = min(3, max(0.5, value)); webView.pageZoom = zoom }
     func close() {
+        spoofFrames.close()
         faviconTask?.cancel()
         webView.stopLoading()
         webView.pauseAllMediaPlayback(completionHandler: nil)
@@ -266,7 +274,7 @@ final class BrowserTab: NSObject, Identifiable, WKNavigationDelegate, WKUIDelega
                  for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
         guard navigationAction.targetFrame == nil, let session else { return nil }
         // WebKit supplies the opener's configuration; preserving it is required for window.open.
-        let tab = session.newTab(configuration: configuration)
+        let tab = session.newTab(configuration: configuration, spaceID: spaceID)
         tab.isBlankPage = false
         return tab.webView
     }
@@ -338,6 +346,18 @@ struct ReaderContent { var title: String; var text: String }
 
 struct WebContentView: NSViewRepresentable {
     let tab: BrowserTab
-    func makeNSView(context: Context) -> WKWebView { tab.webView }
-    func updateNSView(_ nsView: WKWebView, context: Context) { tab.updateWebsiteAppearance() }
+    func makeNSView(context: Context) -> WKWebView {
+        roundCorners(tab.webView)
+        return tab.webView
+    }
+    func updateNSView(_ nsView: WKWebView, context: Context) {
+        roundCorners(nsView)
+        tab.updateWebsiteAppearance()
+    }
+    private func roundCorners(_ webView: WKWebView) {
+        webView.wantsLayer = true
+        webView.layer?.cornerRadius = BrowserPageFrame.cornerRadius
+        webView.layer?.cornerCurve = .continuous
+        webView.layer?.masksToBounds = true
+    }
 }

@@ -1,6 +1,11 @@
 import AppKit
 import SwiftUI
 
+enum BrowserPageFrame {
+  static let inset: CGFloat = 6
+  static let cornerRadius: CGFloat = 12
+}
+
 extension Color {
   static let oasisAccent = Color(
     nsColor: NSColor(name: nil) { appearance in
@@ -16,6 +21,7 @@ struct BrowserWindowHost: View {
   @State private var session: BrowserSession
   @State private var hasAppeared = false
   @Environment(\.openWindow) private var openWindow
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
   @AppStorage("appearance") private var appearance = "System"
 
   init(request: BrowserWindowRequest?) {
@@ -26,7 +32,7 @@ struct BrowserWindowHost: View {
     BrowserWindow(session: session)
       .preferredColorScheme(appearance == "Light" ? .light : appearance == "Dark" ? .dark : nil)
       .focusedSceneValue(\.browserSession, session)
-      .background(WindowLifecycleView { session.shutdown() })
+      .background(WindowLifecycleView(showsSidebar: session.showsTabSidebar, reduceMotion: reduceMotion) { session.shutdown() })
       .task {
         guard !hasAppeared else { return }
         hasAppeared = true
@@ -50,15 +56,26 @@ struct BrowserWindowHost: View {
 
 struct BrowserWindow: View {
   @Bindable var session: BrowserSession
+  @AppStorage(BackgroundGrain.preferenceKey) private var backgroundGrain = BackgroundGrain.defaultIntensity
   @Environment(\.colorScheme) private var colorScheme
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
   var body: some View {
     ZStack {
       WindowBackdrop()
+        .overlay {
+          if let color = session.selectedTab?.sidebarTint {
+            Color(nsColor: color).opacity(0.35)
+          } else {
+            Rectangle().fill(.thinMaterial.opacity(0.28))
+          }
+        }
+        .environment(\.colorScheme, session.selectedTab?.sidebarColorScheme ?? colorScheme)
+        .overlay { BackgroundGrain(intensity: backgroundGrain) }
+        .allowsHitTesting(false)
       HStack(spacing: 0) {
         TabSidebar(session: session)
           .overlay(alignment: .top) {
-            WindowDragArea().frame(height: 54)
+            WindowDragArea().frame(height: TabSidebar.topInset)
           }
           .frame(width: 224)
           .environment(\.colorScheme, session.selectedTab?.sidebarColorScheme ?? colorScheme)
@@ -93,9 +110,11 @@ struct BrowserWindow: View {
           }
           .environment(\.colorScheme, session.selectedTab?.chromeColorScheme ?? colorScheme)
           .padding(.top, 12)
-          .padding(.horizontal, session.showsTabSidebar ? 14 : 92)
+          .padding(.horizontal, 14)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .clipShape(RoundedRectangle(cornerRadius: BrowserPageFrame.cornerRadius, style: .continuous))
+        .padding(BrowserPageFrame.inset)
       }
       .animation(reduceMotion ? nil : .spring(duration: 0.36, bounce: 0.08), value: session.showsTabSidebar)
       .allowsHitTesting(!session.showsNewTabSearch)
@@ -508,31 +527,62 @@ struct AddressBar: View {
 
 // AppKit supplies transparent window backing and the window-close lifecycle.
 struct WindowLifecycleView: NSViewRepresentable {
+  var showsSidebar: Bool
+  var reduceMotion: Bool
   var onClose: () -> Void
-  func makeNSView(context: Context) -> CloseObserverView { CloseObserverView(onClose: onClose) }
-  func updateNSView(_ nsView: CloseObserverView, context: Context) { nsView.onClose = onClose }
+  func makeNSView(context: Context) -> CloseObserverView {
+    let view = CloseObserverView(onClose: onClose)
+    view.configureTrafficLights(showsSidebar: showsSidebar, reduceMotion: reduceMotion)
+    return view
+  }
+  func updateNSView(_ nsView: CloseObserverView, context: Context) {
+    nsView.onClose = onClose
+    nsView.configureTrafficLights(showsSidebar: showsSidebar, reduceMotion: reduceMotion)
+  }
 }
 final class CloseObserverView: NSView {
   var onClose: () -> Void
-  private var observer: NSObjectProtocol?
+  private var observers: [NSObjectProtocol] = []
+  private var trafficLights: WindowTrafficLights?
+  private var showsSidebar = true
   init(onClose: @escaping () -> Void) {
     self.onClose = onClose
     super.init(frame: .zero)
   }
   required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+  func configureTrafficLights(showsSidebar: Bool, reduceMotion: Bool) {
+    self.showsSidebar = showsSidebar
+    trafficLights?.update(visible: showsSidebar, animated: !reduceMotion)
+  }
   override func viewDidMoveToWindow() {
     super.viewDidMoveToWindow()
-    if let observer { NotificationCenter.default.removeObserver(observer) }
+    trafficLights?.restore()
+    trafficLights = nil
+    for observer in observers { NotificationCenter.default.removeObserver(observer) }
+    observers = []
     guard let window else { return }
     window.isMovableByWindowBackground = false
     window.isOpaque = false
     window.backgroundColor = .clear
     window.titlebarAppearsTransparent = true
-    observer = NotificationCenter.default.addObserver(
+    trafficLights = WindowTrafficLights(window: window)
+    trafficLights?.update(visible: showsSidebar, animated: false)
+    observers.append(NotificationCenter.default.addObserver(
       forName: NSWindow.willCloseNotification, object: window, queue: .main
-    ) { [weak self] _ in MainActor.assumeIsolated { self?.onClose() } }
+    ) { [weak self] _ in MainActor.assumeIsolated { self?.onClose() } })
+    for name in [NSWindow.didResizeNotification, NSWindow.didEnterFullScreenNotification, NSWindow.didExitFullScreenNotification] {
+      observers.append(NotificationCenter.default.addObserver(forName: name, object: window, queue: .main) { [weak self] _ in
+        MainActor.assumeIsolated {
+          guard let self else { return }
+          self.trafficLights?.update(visible: self.showsSidebar, animated: false, force: true)
+        }
+      })
+    }
   }
-  isolated deinit { if let observer { NotificationCenter.default.removeObserver(observer) } }
+  isolated deinit {
+    trafficLights?.restore()
+    for observer in observers { NotificationCenter.default.removeObserver(observer) }
+  }
 }
 
 /// The window's system vibrancy material blends with the desktop behind Oasis.

@@ -10,6 +10,7 @@ final class BrowserLibrary {
     var spoofModeEnabled = false {
         didSet {
             guard spoofModeEnabled != oldValue else { return }
+            if !spoofModeEnabled { ClipboardTyping.shared.stop() }
             UserDefaults.standard.set(spoofModeEnabled, forKey: "spoofMode")
             for session in sessions.values {
                 for tab in session.tabs { tab.setSpoofMode(spoofModeEnabled) }
@@ -32,12 +33,64 @@ final class BrowserLibrary {
                 storageError = "Oasis couldn’t read its library. The original file was preserved. \(error.localizedDescription)"
             }
         } else { data = LibraryData() }
+        if let links = data.essentials {
+            for link in links where !data.bookmarks.contains(where: { $0.url == link.url && !$0.isReadingList }) {
+                data.bookmarks.append(Bookmark(url: link.url, title: link.title))
+            }
+            data.essentials = nil
+        }
     }
 
     var bookmarks: [Bookmark] { data.bookmarks.filter { !$0.isReadingList } }
     var favorites: [Bookmark] { bookmarks.filter(\.isFavorite) }
     var readingList: [Bookmark] { data.bookmarks.filter(\.isReadingList) }
     var history: [HistoryEntry] { data.history }
+    var spaces: [BrowserSpace] {
+        guard let spaces = data.spaces, !spaces.isEmpty else { return BrowserSpace.defaults }
+        return spaces
+    }
+
+    @discardableResult
+    func addSpace(name: String, emoji: String) -> BrowserSpace? {
+        let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, BrowserSpace.isValidEmoji(emoji) else { return nil }
+        let space = BrowserSpace(name: name, emoji: emoji)
+        data.spaces = spaces + [space]
+        persist()
+        return space
+    }
+
+    func updateSpace(_ id: UUID, name: String, emoji: String) {
+        let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, BrowserSpace.isValidEmoji(emoji), let index = spaces.firstIndex(where: { $0.id == id }) else { return }
+        var updated = spaces
+        updated[index].name = name
+        updated[index].emoji = emoji
+        data.spaces = updated
+        persist()
+    }
+
+    @discardableResult
+    func removeSpace(_ id: UUID) -> Bool {
+        let remaining = spaces.filter { $0.id != id }
+        guard !remaining.isEmpty, remaining.count != spaces.count else { return false }
+        let fallback = remaining[0].id
+        data.spaces = remaining
+        for session in sessions.values where !session.isPrivate {
+            session.mergeSpace(id, into: fallback)
+        }
+        for key in Array(data.windows.keys) {
+            guard var window = data.windows[key] else { continue }
+            for index in window.tabs.indices where window.tabs[index].spaceID == id {
+                window.tabs[index].spaceID = fallback
+            }
+            if window.selectedSpaceID == id { window.selectedSpaceID = fallback }
+            window.selectedIndicesBySpace?.removeValue(forKey: id.uuidString)
+            data.windows[key] = window
+        }
+        persist()
+        return true
+    }
     var searchEngine: SearchEngine {
         SearchEngine(rawValue: UserDefaults.standard.string(forKey: "searchEngine") ?? "") ?? .duckDuckGo
     }
