@@ -146,6 +146,9 @@ import WebKit
         let before = try await webView.evaluateJavaScript("textarea.value") as? String
         try await Task.sleep(for: .milliseconds(100))
         let after = try await webView.evaluateJavaScript("textarea.value") as? String
+        let released = try await webView.callAsyncJavaScript("return !globalThis.__oasisClipboardTyping;",
+            arguments: [:], in: nil, contentWorld: .defaultClient) as? Bool
+        #expect(released == true)
         #expect(before == after)
         #expect((after?.count ?? 0) > 0 && (after?.count ?? 0) < 200)
     }

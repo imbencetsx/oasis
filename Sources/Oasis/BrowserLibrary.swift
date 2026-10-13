@@ -4,7 +4,13 @@ import WebKit
 @MainActor @Observable
 final class BrowserLibrary {
     static let shared = BrowserLibrary()
-    private(set) var data: LibraryData
+    private var historyEntries: [HistoryEntry] = []
+    private var bookmarkEntries: [Bookmark] = []
+    private var spaceRecords: [BrowserSpace]?
+    @ObservationIgnored private var windows: [String: SavedWindow] = [:]
+    var data: LibraryData {
+        LibraryData(history: historyEntries, bookmarks: bookmarkEntries, windows: windows, spaces: spaceRecords)
+    }
     var storageError: String?
     var isClearingWebsiteData = false
     var spoofModeEnabled = false {
@@ -17,36 +23,40 @@ final class BrowserLibrary {
             }
         }
     }
-    @ObservationIgnored private let storageURL: URL
+    @ObservationIgnored private let storage: LibraryStorage
     @ObservationIgnored private var saveTask: Task<Void, Never>?
     @ObservationIgnored private var restorationClaimed = false
     @ObservationIgnored private var sessions: [UUID: BrowserSession] = [:]
 
     init(storageURL: URL? = nil) {
         spoofModeEnabled = UserDefaults.standard.bool(forKey: "spoofMode")
-        self.storageURL = storageURL ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        let fileURL = storageURL ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Oasis", isDirectory: true).appendingPathComponent("Library.json")
-        if FileManager.default.fileExists(atPath: self.storageURL.path) {
-            do { data = try JSONDecoder().decode(LibraryData.self, from: Data(contentsOf: self.storageURL)) }
+        storage = LibraryStorage(url: fileURL)
+        var loaded = LibraryData()
+        if FileManager.default.fileExists(atPath: fileURL.path) {
+            do { loaded = try JSONDecoder().decode(LibraryData.self, from: Data(contentsOf: fileURL)) }
             catch {
-                data = LibraryData()
                 storageError = "Oasis couldn’t read its library. The original file was preserved. \(error.localizedDescription)"
             }
-        } else { data = LibraryData() }
-        if let links = data.essentials {
-            for link in links where !data.bookmarks.contains(where: { $0.url == link.url && !$0.isReadingList }) {
-                data.bookmarks.append(Bookmark(url: link.url, title: link.title))
-            }
-            data.essentials = nil
         }
+        if let links = loaded.essentials {
+            for link in links where !loaded.bookmarks.contains(where: { $0.url == link.url && !$0.isReadingList }) {
+                loaded.bookmarks.append(Bookmark(url: link.url, title: link.title))
+            }
+        }
+        historyEntries = loaded.history
+        bookmarkEntries = loaded.bookmarks
+        spaceRecords = loaded.spaces
+        windows = loaded.windows
     }
 
-    var bookmarks: [Bookmark] { data.bookmarks.filter { !$0.isReadingList } }
+    var bookmarks: [Bookmark] { bookmarkEntries.filter { !$0.isReadingList } }
     var favorites: [Bookmark] { bookmarks.filter(\.isFavorite) }
-    var readingList: [Bookmark] { data.bookmarks.filter(\.isReadingList) }
-    var history: [HistoryEntry] { data.history }
+    var readingList: [Bookmark] { bookmarkEntries.filter(\.isReadingList) }
+    var history: [HistoryEntry] { historyEntries }
     var spaces: [BrowserSpace] {
-        guard let spaces = data.spaces, !spaces.isEmpty else { return BrowserSpace.defaults }
+        guard let spaces = spaceRecords, !spaces.isEmpty else { return BrowserSpace.defaults }
         return spaces
     }
 
@@ -55,7 +65,7 @@ final class BrowserLibrary {
         let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty, BrowserSpace.isValidEmoji(emoji) else { return nil }
         let space = BrowserSpace(name: name, emoji: emoji)
-        data.spaces = spaces + [space]
+        spaceRecords = spaces + [space]
         persist()
         return space
     }
@@ -66,7 +76,7 @@ final class BrowserLibrary {
         var updated = spaces
         updated[index].name = name
         updated[index].emoji = emoji
-        data.spaces = updated
+        spaceRecords = updated
         persist()
     }
 
@@ -75,18 +85,18 @@ final class BrowserLibrary {
         let remaining = spaces.filter { $0.id != id }
         guard !remaining.isEmpty, remaining.count != spaces.count else { return false }
         let fallback = remaining[0].id
-        data.spaces = remaining
+        spaceRecords = remaining
         for session in sessions.values where !session.isPrivate {
             session.mergeSpace(id, into: fallback)
         }
-        for key in Array(data.windows.keys) {
-            guard var window = data.windows[key] else { continue }
+        for key in Array(windows.keys) {
+            guard var window = windows[key] else { continue }
             for index in window.tabs.indices where window.tabs[index].spaceID == id {
                 window.tabs[index].spaceID = fallback
             }
             if window.selectedSpaceID == id { window.selectedSpaceID = fallback }
             window.selectedIndicesBySpace?.removeValue(forKey: id.uuidString)
-            data.windows[key] = window
+            windows[key] = window
         }
         persist()
         return true
@@ -97,31 +107,33 @@ final class BrowserLibrary {
 
     func recordVisit(url: URL, title: String) {
         guard url.isWebURL else { return }
-        if let first = data.history.first, first.url == url, Date().timeIntervalSince(first.visitedAt) < 10 {
-            data.history[0].title = title
-        } else { data.history.insert(HistoryEntry(url: url, title: title), at: 0) }
+        if let first = historyEntries.first, first.url == url, Date().timeIntervalSince(first.visitedAt) < 10 {
+            historyEntries[0].title = title
+        } else { historyEntries.insert(HistoryEntry(url: url, title: title), at: 0) }
         let days = UserDefaults.standard.integer(forKey: "historyRetentionDays")
-        if days > 0 { data.history.removeAll { $0.visitedAt < Date().addingTimeInterval(-Double(days) * 86400) } }
-        if data.history.count > 10_000 { data.history = Array(data.history.prefix(10_000)) }
+        if days > 0 {
+            let cutoff = Date().addingTimeInterval(-Double(days) * 86400)
+            historyEntries.removeAll { $0.visitedAt < cutoff }
+        }
+        if historyEntries.count > 10_000 { historyEntries = Array(historyEntries.prefix(10_000)) }
         persist()
     }
 
-    func isBookmarked(_ url: URL?) -> Bool { bookmarks.contains { $0.url == url } }
     func addBookmark(url: URL, title: String, readingList: Bool = false) {
-        guard !data.bookmarks.contains(where: { $0.url == url && $0.isReadingList == readingList }) else { return }
-        data.bookmarks.append(Bookmark(url: url, title: title.isEmpty ? url.displayHost : title,
+        guard !bookmarkEntries.contains(where: { $0.url == url && $0.isReadingList == readingList }) else { return }
+        bookmarkEntries.append(Bookmark(url: url, title: title.isEmpty ? url.displayHost : title,
                                        isFavorite: !readingList, isReadingList: readingList))
         persist()
     }
     func updateBookmark(_ bookmark: Bookmark) {
-        guard let index = data.bookmarks.firstIndex(where: { $0.id == bookmark.id }) else { return }
-        data.bookmarks[index] = bookmark
+        guard let index = bookmarkEntries.firstIndex(where: { $0.id == bookmark.id }) else { return }
+        bookmarkEntries[index] = bookmark
         persist()
     }
-    func removeBookmark(_ id: UUID) { data.bookmarks.removeAll { $0.id == id }; persist() }
-    func removeHistory(_ id: UUID) { data.history.removeAll { $0.id == id }; persist() }
+    func removeBookmark(_ id: UUID) { bookmarkEntries.removeAll { $0.id == id }; persist() }
+    func removeHistory(_ id: UUID) { historyEntries.removeAll { $0.id == id }; persist() }
     func clearHistory(since date: Date = .distantPast) {
-        data.history.removeAll { $0.visitedAt >= date }
+        historyEntries.removeAll { $0.visitedAt >= date }
         persist()
     }
     func clearWebsiteData() async {
@@ -135,43 +147,50 @@ final class BrowserLibrary {
     }
     func unregister(_ session: BrowserSession) {
         sessions.removeValue(forKey: session.id)
-        data.windows.removeValue(forKey: session.id.uuidString)
+        windows.removeValue(forKey: session.id.uuidString)
         persist()
     }
     func claimRestoredWindows() -> [SavedWindow] {
         guard !restorationClaimed else { return [] }
         restorationClaimed = true
-        let result = Array(data.windows.sorted { $0.key < $1.key }.map(\.value))
-        data.windows = [:]
+        let result = Array(windows.sorted { $0.key < $1.key }.map(\.value))
+        windows = [:]
         return (UserDefaults.standard.object(forKey: "restoreSession") as? Bool ?? false) ? result : []
     }
     func saveSession(_ session: BrowserSession) {
         guard !session.isPrivate else { return }
-        data.windows[session.id.uuidString] = session.snapshot
+        let snapshot = session.snapshot
+        guard windows[session.id.uuidString] != snapshot else { return }
+        windows[session.id.uuidString] = snapshot
         persist()
     }
     func flush() {
         saveTask?.cancel()
         for session in sessions.values where !session.isPrivate {
-            data.windows[session.id.uuidString] = session.snapshot
+            windows[session.id.uuidString] = session.snapshot
         }
-        write()
+        guard storageError == nil else { return }
+        do { try storage.flush(data) }
+        catch { storageError = "Oasis couldn’t save your library. \(error.localizedDescription)" }
     }
     private func persist() {
         saveTask?.cancel()
         saveTask = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(300))
             guard !Task.isCancelled else { return }
-            self?.write()
+            self?.writeAsynchronously()
         }
     }
-    private func write() {
+    private func writeAsynchronously() {
         // A failed load must never overwrite the recoverable original library.
         guard storageError == nil else { return }
-        do {
-            try FileManager.default.createDirectory(at: storageURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try JSONEncoder().encode(data).write(to: storageURL, options: .atomic)
-        } catch { storageError = "Oasis couldn’t save your library. \(error.localizedDescription)" }
+        storage.schedule(data) { [weak self] result in
+            if case .failure(let error) = result {
+                Task { @MainActor [weak self] in
+                    self?.storageError = "Oasis couldn’t save your library. \(error.localizedDescription)"
+                }
+            }
+        }
     }
 
     func exportBookmarks() {

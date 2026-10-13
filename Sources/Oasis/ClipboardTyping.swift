@@ -26,6 +26,8 @@ final class ClipboardTyping {
     private(set) var isTyping = false
     @ObservationIgnored private var task: Task<Void, Never>?
     @ObservationIgnored private var eventMonitor: Any?
+    @ObservationIgnored private weak var typingWebView: WKWebView?
+    @ObservationIgnored private var focusToken: String?
 
     func toggle(spoofModeEnabled: Bool) {
         if isTyping { stop(); return }
@@ -41,6 +43,13 @@ final class ClipboardTyping {
         isTyping = false
         if let eventMonitor { NSEvent.removeMonitor(eventMonitor) }
         eventMonitor = nil
+        if let webView = typingWebView, let token = focusToken {
+            // A completed/cancelled run must release its DOM and iframe references.
+            webView.evaluateJavaScript("if (globalThis.__oasisClipboardTyping?.token === '\(token)') delete globalThis.__oasisClipboardTyping;",
+                in: nil, in: .defaultClient) { _ in }
+        }
+        typingWebView = nil
+        focusToken = nil
     }
 
     func start(text: String, in window: NSWindow, spoofModeEnabled: Bool, speedMultiplier: Double? = nil) {
@@ -54,6 +63,8 @@ final class ClipboardTyping {
         let token = UUID().uuidString
         let speed = ClipboardTypingSpeed.normalized(speedMultiplier ?? ClipboardTypingSpeed.savedMultiplier())
         isTyping = true
+        typingWebView = webView
+        focusToken = token
         // Any manual typing or click cancels the remaining text. Let Command-9
         // reach the menu action so the same shortcut can stop an active run.
         eventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] event in
@@ -67,6 +78,7 @@ final class ClipboardTyping {
                 // A cancelled run must not stop a newer run.
                 if !Task.isCancelled { self?.stop() }
             }
+            guard !Task.isCancelled else { return }
             if let webView {
                 guard (try? await webView.callAsyncJavaScript(Self.captureFocus,
                     arguments: ["token": token], in: nil, contentWorld: .defaultClient)) as? Bool == true else { return }

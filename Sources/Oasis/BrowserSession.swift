@@ -22,6 +22,7 @@ final class BrowserSession: Identifiable {
   private var privateSpaces = BrowserSpace.defaults
   private var selectedBySpace: [UUID: UUID] = [:]
   @ObservationIgnored private var activated = false
+  @ObservationIgnored private var isRestoring = false
   @ObservationIgnored private let privateStore: WKWebsiteDataStore?
 
   init(library: BrowserLibrary? = nil, isPrivate: Bool = false) {
@@ -34,15 +35,15 @@ final class BrowserSession: Identifiable {
   var spaces: [BrowserSpace] { isPrivate ? privateSpaces : library.spaces }
   var currentSpace: BrowserSpace { spaces.first { $0.id == currentSpaceID } ?? spaces[0] }
   var currentTabs: [BrowserTab] { tabs.filter { $0.spaceID == currentSpaceID } }
-  var pinnedTabs: [BrowserTab] { currentTabs.filter(\.isPinned) }
-  var unpinnedTabs: [BrowserTab] { currentTabs.filter { !$0.isPinned } }
-  var selectedTab: BrowserTab? { currentTabs.first { $0.id == selectedID } }
+  var pinnedTabs: [BrowserTab] { tabs.filter { $0.spaceID == currentSpaceID && $0.isPinned } }
+  var unpinnedTabs: [BrowserTab] { tabs.filter { $0.spaceID == currentSpaceID && !$0.isPinned } }
+  var selectedTab: BrowserTab? { tabs.first { $0.id == selectedID && $0.spaceID == currentSpaceID } }
   var snapshot: SavedWindow {
     var selections = selectedBySpace
     if let selectedID { selections[currentSpaceID] = selectedID }
-    let indices = selections.reduce(into: [String: Int]()) { result, entry in
-      if let index = tabs.firstIndex(where: { $0.id == entry.value && $0.spaceID == entry.key }) {
-        result[entry.key.uuidString] = index
+    let indices = tabs.enumerated().reduce(into: [String: Int]()) { result, entry in
+      if let space = entry.element.spaceID, selections[space] == entry.element.id {
+        result[space.uuidString] = entry.offset
       }
     }
     return SavedWindow(
@@ -55,6 +56,7 @@ final class BrowserSession: Identifiable {
     activated = true
     library.register(self)
     if let restored {
+      isRestoring = true
       tabs.forEach { $0.close() }
       tabs = []
       selectedID = nil
@@ -62,7 +64,8 @@ final class BrowserSession: Identifiable {
       if let id = restored.selectedSpaceID, spaces.contains(where: { $0.id == id }) { currentSpaceID = id }
       for saved in restored.tabs {
         let target = spaces.contains { $0.id == saved.spaceID } ? saved.spaceID : spaces[0].id
-        let tab = newTab(url: saved.url, select: false, spaceID: target)
+        let tab = newTab(select: false, spaceID: target)
+        tab.prepareRestoration(url: saved.url)
         tab.isPinned = saved.isPinned
       }
       for (key, index) in restored.selectedIndicesBySpace ?? [:] {
@@ -76,6 +79,8 @@ final class BrowserSession: Identifiable {
         if tab.spaceID == currentSpaceID { selectedBySpace[currentSpaceID] = tab.id }
       }
       selectedID = selectedBySpace[currentSpaceID] ?? currentTabs.first?.id
+      isRestoring = false
+      selectedTab?.loadIfNeeded()
     }
     showsNewTabSearch = false
     save()
@@ -90,8 +95,8 @@ final class BrowserSession: Identifiable {
     let target = spaceID.flatMap { id in spaces.contains { $0.id == id } ? id : nil } ?? currentSpaceID
     tab.session = self
     tab.spaceID = target
-    if select && target != currentSpaceID { selectSpace(target) }
     tabs.append(tab)
+    if select && target != currentSpaceID { selectSpace(target, selecting: tab.id) }
     if select || (selectedID == nil && target == currentSpaceID) {
       selectedID = tab.id
       selectedBySpace[target] = tab.id
@@ -114,9 +119,10 @@ final class BrowserSession: Identifiable {
   }
   func select(_ id: UUID) {
     guard let tab = tabs.first(where: { $0.id == id }), let space = tab.spaceID else { return }
-    if space != currentSpaceID { selectSpace(space) }
+    if space != currentSpaceID { selectSpace(space, selecting: id) }
     selectedID = id
     selectedBySpace[currentSpaceID] = id
+    selectedTab?.loadIfNeeded()
     showsFind = false
     showsNewTabSearch = false
     save()
@@ -125,19 +131,24 @@ final class BrowserSession: Identifiable {
     showsNewTabSearch = false
     focusAddressToken = UUID()
   }
-  func closeTab(_ id: UUID) {
-    guard let index = tabs.firstIndex(where: { $0.id == id }) else { return }
-    let tab = tabs[index]
-    if !isPrivate && !tab.isBlankPage {
-      closedTabs.append(SavedTab(url: tab.url, isPinned: tab.isPinned, spaceID: tab.spaceID))
-      if closedTabs.count > 20 { closedTabs.removeFirst() }
+  func closeTab(_ id: UUID) { closeTabs([id]) }
+
+  func closeTabs(_ ids: Set<UUID>) {
+    let closing = tabs.filter { ids.contains($0.id) }
+    guard !closing.isEmpty else { return }
+    if !isPrivate {
+      closedTabs.append(contentsOf: closing.filter { !$0.isBlankPage }.map {
+        SavedTab(url: $0.url, isPinned: $0.isPinned, spaceID: $0.spaceID)
+      })
+      closedTabs = Array(closedTabs.suffix(20))
     }
-    tab.close()
-    tabs.remove(at: index)
-    if let space = tab.spaceID, selectedBySpace[space] == id { selectedBySpace.removeValue(forKey: space) }
-    if selectedID == id {
-      selectedID = currentTabs.first?.id
-      if let selectedID { selectedBySpace[currentSpaceID] = selectedID }
+    closing.forEach { $0.close() }
+    tabs.removeAll { ids.contains($0.id) }
+    selectedBySpace = selectedBySpace.filter { !ids.contains($0.value) }
+    if let selectedID, ids.contains(selectedID) {
+      self.selectedID = currentTabs.first?.id
+      if let selectedID = self.selectedID { selectedBySpace[currentSpaceID] = selectedID }
+      selectedTab?.loadIfNeeded()
     }
     if currentTabs.isEmpty { showsNewTabSearch = false }
     save()
@@ -154,12 +165,14 @@ final class BrowserSession: Identifiable {
     sortPinned()
     save()
   }
-  func selectSpace(_ id: UUID) {
+  func selectSpace(_ id: UUID, selecting tabID: UUID? = nil) {
     guard spaces.contains(where: { $0.id == id }), id != currentSpaceID else { return }
     if let selectedID { selectedBySpace[currentSpaceID] = selectedID }
     currentSpaceID = id
-    let remembered = selectedBySpace[id]
-    selectedID = currentTabs.first(where: { $0.id == remembered })?.id ?? currentTabs.first?.id
+    let remembered = tabID ?? selectedBySpace[id]
+    let candidates = currentTabs
+    selectedID = candidates.first(where: { $0.id == remembered })?.id ?? candidates.first?.id
+    selectedTab?.loadIfNeeded()
     showsFind = false
     showsNewTabSearch = false
     ClipboardTyping.shared.stop()
@@ -197,10 +210,14 @@ final class BrowserSession: Identifiable {
   func removeSpace(_ id: UUID) -> Bool {
     let remaining = spaces.filter { $0.id != id }
     guard !remaining.isEmpty, remaining.count != spaces.count else { return false }
-    if isPrivate { privateSpaces = remaining }
-    mergeSpace(id, into: remaining[0].id)
-    if !isPrivate { return library.removeSpace(id) }
-    return true
+    if isPrivate {
+      privateSpaces = remaining
+      mergeSpace(id, into: remaining[0].id)
+      return true
+    }
+    let removed = library.removeSpace(id)
+    if removed && !activated { mergeSpace(id, into: remaining[0].id) }
+    return removed
   }
 
   func mergeSpace(_ id: UUID, into fallback: UUID) {
@@ -210,6 +227,7 @@ final class BrowserSession: Identifiable {
       currentSpaceID = fallback
       if !currentTabs.contains(where: { $0.id == selectedID }) { selectedID = currentTabs.first?.id }
       if let selectedID { selectedBySpace[fallback] = selectedID }
+      selectedTab?.loadIfNeeded()
       showsNewTabSearch = false
       showsFind = false
       ClipboardTyping.shared.stop()
@@ -225,16 +243,15 @@ final class BrowserSession: Identifiable {
     if let old = tab.spaceID, selectedBySpace[old] == tabID { selectedBySpace.removeValue(forKey: old) }
     tab.spaceID = spaceID
     if selectedID == tabID { selectedID = currentTabs.first?.id }
-    selectSpace(spaceID)
+    selectSpace(spaceID, selecting: tabID)
     select(tabID)
     return true
   }
 
   func clearCurrentSpace() {
-    for id in unpinnedTabs.map(\.id) { closeTab(id) }
+    closeTabs(Set(unpinnedTabs.map(\.id)))
     showsFind = false
     showsNewTabSearch = false
-    save()
   }
   private func sortPinned() { tabs = tabs.filter(\.isPinned) + tabs.filter { !$0.isPinned } }
   @discardableResult
@@ -263,11 +280,13 @@ final class BrowserSession: Identifiable {
     library.addBookmark(url: url, title: tab.title, readingList: readingList)
     showLibrary(readingList ? .readingList : .bookmarks)
   }
-  func save() { if activated { library.saveSession(self) } }
+  func save() { if activated && !isRestoring { library.saveSession(self) } }
   func shutdown() {
     guard activated else { return }
     if !AppLifecycle.isTerminating { library.unregister(self) }
     tabs.forEach { $0.close() }
+    tabs.removeAll()
+    selectedID = nil
     if isPrivate { downloads.cancelAll() }
     activated = false
   }

@@ -56,22 +56,11 @@ struct BrowserWindowHost: View {
 
 struct BrowserWindow: View {
   @Bindable var session: BrowserSession
-  @AppStorage(BackgroundGrain.preferenceKey) private var backgroundGrain = BackgroundGrain.defaultIntensity
   @Environment(\.colorScheme) private var colorScheme
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
   var body: some View {
     ZStack {
-      WindowBackdrop()
-        .overlay {
-          if let color = session.selectedTab?.sidebarTint {
-            Color(nsColor: color).opacity(0.35)
-          } else {
-            Rectangle().fill(.thinMaterial.opacity(0.28))
-          }
-        }
-        .environment(\.colorScheme, session.selectedTab?.sidebarColorScheme ?? colorScheme)
-        .overlay { BackgroundGrain(intensity: backgroundGrain) }
-        .allowsHitTesting(false)
+      BrowserBackdrop(tab: session.selectedTab)
       HStack(spacing: 0) {
         TabSidebar(session: session)
           .overlay(alignment: .top) {
@@ -142,9 +131,6 @@ struct BrowserWindow: View {
       Button("OK") { session.notice = nil }
     } message: {
       Text(session.notice ?? "")
-    }
-    .onChange(of: session.selectedID) { _, id in
-      if let id { session.select(id) }
     }
     .onChange(of: session.library.storageError) { _, error in
       if let error { session.notice = error }
@@ -582,6 +568,23 @@ final class CloseObserverView: NSView {
   isolated deinit {
     trafficLights?.restore()
     for observer in observers { NotificationCenter.default.removeObserver(observer) }
+  }
+}
+
+private struct BrowserBackdrop: View {
+  let tab: BrowserTab?
+  @AppStorage(BackgroundGrain.preferenceKey) private var grain = BackgroundGrain.defaultIntensity
+  @Environment(\.colorScheme) private var colorScheme
+
+  var body: some View {
+    WindowBackdrop()
+      .overlay {
+        if let color = tab?.sidebarTint { Color(nsColor: color).opacity(0.35) }
+        else { Rectangle().fill(.thinMaterial.opacity(0.28)) }
+      }
+      .environment(\.colorScheme, tab?.sidebarColorScheme ?? colorScheme)
+      .overlay { BackgroundGrain(intensity: grain) }
+      .allowsHitTesting(false)
   }
 }
 
