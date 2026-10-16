@@ -201,15 +201,17 @@ enum SpoofMode {
   static let frameRestoreSource = restoreSource.replacingOccurrences(of: "restore(window);", with: "restore(window, false);")
 
   @MainActor static func configure(_ controller: WKUserContentController, enabled: Bool) {
-    let scripts = controller.userScripts
+    // controller.userScripts bridges as a live view: removeAllUserScripts clears
+    // previously fetched arrays (observed count dropping to 0, and out-of-bounds
+    // crashes in objectAtIndex: when the backing storage is repurposed). Snapshot
+    // into native storage first so no live reference survives past a mutation.
+    let scripts: [WKUserScript] = controller.userScripts.map { $0 }
     let owned = scripts.filter { $0.source.hasPrefix(marker) }
     if enabled {
       if owned.count == 1, let script = owned.first,
          script.source == source, script.injectionTime == .atDocumentStart,
          !script.isForMainFrameOnly, scripts.last === script { return }
     } else if owned.isEmpty { return }
-    // WebKit's bridged array is a live view of the controller's scripts.
-    // Materialize the scripts to keep before clearing its backing storage.
     let preserved = scripts.filter { !$0.source.hasPrefix(marker) }
     controller.removeAllUserScripts()
     for script in preserved {

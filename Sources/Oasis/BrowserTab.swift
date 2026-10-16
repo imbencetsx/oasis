@@ -289,21 +289,10 @@ final class BrowserTab: NSObject, Identifiable, WKNavigationDelegate, WKUIDelega
             let iconURL = declared.flatMap { URL(string: $0) }.flatMap { $0.isWebURL ? $0 : nil }
                 ?? URL(string: "/favicon.ico", relativeTo: pageURL)?.absoluteURL
             guard let iconURL else { return }
-            let client = URLSession(configuration: .ephemeral)
-            defer { client.finishTasksAndInvalidate() }
-            do {
-                let (data, response) = try await client.data(for: URLRequest(url: iconURL, timeoutInterval: 8))
-                guard !Task.isCancelled, self.url == pageURL, data.count <= 1_000_000,
-                      let response = response as? HTTPURLResponse, (200..<300).contains(response.statusCode) else { return }
-                let thumbnail = await Task.detached(priority: .utility) { FaviconThumbnail.decode(data) }.value
-                guard !Task.isCancelled, self.url == pageURL else { return }
-                if let thumbnail {
-                    favicon = NSImage(cgImage: thumbnail, size: NSSize(width: thumbnail.width, height: thumbnail.height))
-                } else {
-                    // Preserve vector/other formats supported by AppKit but not ImageIO.
-                    favicon = NSImage(data: data)
-                }
-            } catch { /* Sites without an icon keep the document fallback. */ }
+            guard let image = await FaviconLoader.download(iconURL) else { return }
+            guard !Task.isCancelled, self.url == pageURL else { return }
+            favicon = image
+            session?.library.storeFavicon(image, for: pageURL)
         }
     }
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) { failed(error) }

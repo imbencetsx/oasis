@@ -113,7 +113,8 @@ import WebKit
         clients.removeObject(forKey: webView)
         guard clients.keyEnumerator().allObjects.isEmpty, let controller else { return }
         controller.removeScriptMessageHandler(forName: Self.name, contentWorld: Self.world)
-        let preserved = controller.userScripts.filter { $0.source != Self.source }
+        // Same live-view hazard as SpoofMode.configure: snapshot before mutating.
+        let preserved: [WKUserScript] = controller.userScripts.map { $0 }.filter { $0.source != Self.source }
         controller.removeAllUserScripts()
         for script in preserved { controller.addUserScript(script) }
         objc_setAssociatedObject(controller, &Self.associationKey, nil, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)

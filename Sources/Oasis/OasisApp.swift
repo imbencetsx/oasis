@@ -40,7 +40,6 @@ import AppKit
 
         Settings {
             BrowserSettings(library: .shared)
-                .tint(Color.oasisAccent)
         }
     }
 }

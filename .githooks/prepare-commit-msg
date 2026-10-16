@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+
+git interpret-trailers --in-place --if-exists addIfDifferent --if-missing add \
+    --trailer 'Co-Authored-By: codex <codex@openai.com>' -- "$1"
