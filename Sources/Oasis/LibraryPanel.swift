@@ -89,7 +89,7 @@ struct LibraryPanel: View {
                 .font(.caption.weight(.medium)).foregroundStyle(.secondary).padding(.horizontal, 10).padding(.top, 12).padding(.bottom, 4)
             ForEach(grouped[date] ?? []) { entry in
                 Button { session.navigate(to: entry.url) } label: {
-                    LibraryRow(url: entry.url, title: entry.title, subtitle: entry.url.displayHost)
+                    LibraryRow(library: session.library, url: entry.url, title: entry.title, subtitle: entry.url.displayHost)
                 }.buttonStyle(OasisButtonStyle()).help(entry.url.absoluteString)
                     .contextMenu {
                         Button("Open in New Tab") { session.newTab(url: entry.url) }
@@ -110,7 +110,7 @@ struct LibraryPanel: View {
                 if bookmark.isReadingList { var read = bookmark; read.isRead = true; session.library.updateBookmark(read) }
             } label: {
                 HStack(spacing: 0) {
-                    LibraryRow(url: bookmark.url, title: bookmark.title, subtitle: bookmark.url.displayHost)
+                    LibraryRow(library: session.library, url: bookmark.url, title: bookmark.title, subtitle: bookmark.url.displayHost)
                     if bookmark.isReadingList && !bookmark.isRead { Circle().fill(Color.oasisAccent).frame(width: 6, height: 6).padding(.trailing, 12).accessibilityLabel("Unread") }
                 }
             }.buttonStyle(OasisButtonStyle()).help(bookmark.url.absoluteString)
@@ -141,13 +141,14 @@ struct LibraryPanel: View {
 }
 
 struct LibraryRow: View {
+    let library: BrowserLibrary
     let url: URL
     let title: String
     let subtitle: String
     @State private var hovering = false
     var body: some View {
         HStack(spacing: 10) {
-            SiteIcon(url: url)
+            LibraryIcon(library: library, url: url)
             VStack(alignment: .leading, spacing: 3) {
                 Text(title.isEmpty ? url.displayHost : title).font(.system(size: 12, weight: .medium)).lineLimit(1)
                 Text(subtitle).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
@@ -156,6 +157,26 @@ struct LibraryRow: View {
         }.padding(9).contentShape(RoundedRectangle(cornerRadius: 8))
             .background(hovering ? Color.primary.opacity(0.045) : .clear, in: RoundedRectangle(cornerRadius: 8))
             .onHover { hovering = $0 }
+    }
+}
+
+/// History and bookmark icon: the cached page favicon when available, fetched
+/// lazily per host, otherwise the letter fallback.
+struct LibraryIcon: View {
+    let library: BrowserLibrary
+    let url: URL
+    var body: some View {
+        Group {
+            if let image = library.favicon(for: url) {
+                Image(nsImage: image)
+                    .resizable().scaledToFit()
+                    .frame(width: 30, height: 30)
+                    .clipShape(RoundedRectangle(cornerRadius: 7))
+            } else {
+                SiteIcon(url: url)
+            }
+        }
+        .onAppear { library.fetchFavicon(for: url) }
     }
 }
 

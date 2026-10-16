@@ -1,5 +1,6 @@
 import SwiftUI
 import WebKit
+import AppKit
 
 @MainActor @Observable
 final class BrowserLibrary {
@@ -8,6 +9,13 @@ final class BrowserLibrary {
     private var bookmarkEntries: [Bookmark] = []
     private var spaceRecords: [BrowserSpace]?
     @ObservationIgnored private var windows: [String: SavedWindow] = [:]
+    // In-memory favicons keyed by lowercase host. Visited pages publish their tab
+    // icon here so history and bookmarks can show real icons without persisting
+    // image data in Library.json. Memory-only: entries vanish with the process.
+    var favicons: [String: NSImage] = [:]
+    @ObservationIgnored private var faviconFetches: [String: Task<Void, Never>] = [:]
+    @ObservationIgnored private var missingFavicons: Set<String> = []
+    private static let maxCachedFavicons = 500
     var data: LibraryData {
         LibraryData(history: historyEntries, bookmarks: bookmarkEntries, windows: windows, spaces: spaceRecords)
     }
@@ -117,6 +125,43 @@ final class BrowserLibrary {
         }
         if historyEntries.count > 10_000 { historyEntries = Array(historyEntries.prefix(10_000)) }
         persist()
+    }
+
+    static func faviconHost(for url: URL) -> String? {
+        guard url.isWebURL, let host = url.host?.lowercased(), !host.isEmpty else { return nil }
+        return host
+    }
+
+    func favicon(for url: URL) -> NSImage? {
+        guard let host = Self.faviconHost(for: url) else { return nil }
+        return favicons[host]
+    }
+
+    /// Publish a tab's decoded icon. First icon per host wins to avoid redundant
+    /// view updates as tabs reload; the cache is small enough to clear on overflow
+    /// and refill lazily from live tabs and row fetches.
+    func storeFavicon(_ image: NSImage, for url: URL) {
+        guard let host = Self.faviconHost(for: url), favicons[host] == nil else { return }
+        if favicons.count >= Self.maxCachedFavicons { favicons.removeAll() }
+        favicons[host] = image
+    }
+
+    /// Best-effort `/favicon.ico` fetch for rows whose host has no cached icon.
+    /// Deduplicated per host and never retried within the process once missing.
+    func fetchFavicon(for url: URL) {
+        guard let host = Self.faviconHost(for: url),
+              favicons[host] == nil, faviconFetches[host] == nil,
+              !missingFavicons.contains(host) else { return }
+        faviconFetches[host] = Task { [weak self] in
+            defer { self?.faviconFetches[host] = nil }
+            guard let iconURL = URL(string: "/favicon.ico", relativeTo: url)?.absoluteURL,
+                  let image = await FaviconLoader.download(iconURL) else {
+                self?.missingFavicons.insert(host)
+                return
+            }
+            guard !Task.isCancelled else { return }
+            self?.storeFavicon(image, for: url)
+        }
     }
 
     func addBookmark(url: URL, title: String, readingList: Bool = false) {
