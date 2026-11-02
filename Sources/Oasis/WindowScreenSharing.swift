@@ -24,12 +24,12 @@ import WebKit
           patch(trackProto, 'getCapabilities', { writable: true, value: function getCapabilities() {
             const capabilities = nativeCapabilities.call(this), sharing = sharedTracks.get(this);
             return sharing ? {...capabilities, displaySurface: 'monitor', logicalSurface: true,
-              cursor: ['never'], deviceId: sharing.settings.deviceId} : capabilities;
+              cursor: ['always'], deviceId: sharing.settings.deviceId} : capabilities;
           }});
           patch(trackProto, 'getConstraints', { writable: true, value: function getConstraints() {
             const constraints = nativeConstraints.call(this);
             return sharedTracks.has(this) ? {...constraints, displaySurface: 'monitor',
-              logicalSurface: true, cursor: 'never'} : constraints;
+              logicalSurface: true, cursor: 'always'} : constraints;
           }});
           if (nativeLabel?.get) patch(trackProto, 'label', { get: function() {
             return sharedTracks.has(this) ? 'Screen 1' : nativeLabel.get.call(this);
@@ -115,7 +115,7 @@ import WebKit
               track = stream.getVideoTracks()[0];
               const sharing = {
                 tracks, finish,
-                settings: {displaySurface: 'monitor', logicalSurface: true, cursor: 'never',
+                settings: {displaySurface: 'monitor', logicalSurface: true, cursor: 'always',
                   deviceId: w.crypto.randomUUID(), screenPixelRatio: w.devicePixelRatio || 1},
                 add(value) { tracks.add(value); sharedTracks.set(value, sharing); }
               };
@@ -201,7 +201,7 @@ import WebKit
             let requestGeneration = generation
             let alert = NSAlert()
             alert.messageText = "Share this tab with \(message.frameInfo.securityOrigin.host)?"
-            alert.informativeText = "Only this tab's website will be shared, without browser controls or the cursor. Opening or switching tabs won't change the shared page. Stop from the Sharing menu in the macOS menu bar. Available only in Spoof Mode."
+            alert.informativeText = "Only this tab's website will be shared, without browser controls. The cursor stays at its last page position when you leave the tab. Opening or switching tabs won't change the shared page. Stop from the Sharing menu in the macOS menu bar. Available only in Spoof Mode."
             alert.addButton(withTitle: "Don't Allow")
             alert.addButton(withTitle: "Share Tab")
             let response = await withCheckedContinuation { continuation in

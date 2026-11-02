@@ -1,5 +1,12 @@
 import CoreGraphics
 
+struct WebViewCaptureCursor: Sendable {
+    let image: CGImage
+    let position: CGPoint
+    let hotSpot: CGPoint
+    let size: CGSize
+}
+
 /// Keeps page-local coordinates at the same scale and origin for a whole share.
 struct WebViewCaptureFraming: Sendable {
     let width: Int
@@ -16,7 +23,8 @@ struct WebViewCaptureFraming: Sendable {
         CGSize(width: max(2, Int(size.width * scale)), height: max(2, Int(size.height * scale)))
     }
 
-    func imageOnFixedCanvas(_ image: CGImage, sourceSize: CGSize? = nil) -> CGImage? {
+    func imageOnFixedCanvas(_ image: CGImage, sourceSize: CGSize? = nil,
+                            cursor: WebViewCaptureCursor? = nil) -> CGImage? {
         guard let context = CGContext(data: nil, width: width, height: height,
                                       bitsPerComponent: 8, bytesPerRow: 0,
                                       space: CGColorSpaceCreateDeviceRGB(),
@@ -34,6 +42,12 @@ struct WebViewCaptureFraming: Sendable {
         let size = sourceSize ?? CGSize(width: image.width, height: image.height)
         context.draw(image, in: CGRect(x: 0, y: CGFloat(height) - size.height,
                                       width: size.width, height: size.height))
+        if let cursor {
+            let origin = CGPoint(x: (cursor.position.x - cursor.hotSpot.x) * scale,
+                                 y: CGFloat(height) - (cursor.position.y - cursor.hotSpot.y + cursor.size.height) * scale)
+            context.draw(cursor.image, in: CGRect(origin: origin,
+                size: CGSize(width: cursor.size.width * scale, height: cursor.size.height * scale)))
+        }
         return context.makeImage()
     }
 }

@@ -18,12 +18,29 @@ import WebKit
         window.isReleasedWhenClosed = false
         window.contentView = tab.webView
         let activity = WindowCaptureActivity(preferences: tab.webView.configuration.preferences)
-        let source = try WebViewCaptureSource(webView: tab.webView)
+        let cursorContext = try #require(CGContext(data: nil, width: 6, height: 6,
+            bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        cursorContext.setFillColor(CGColor(gray: 1, alpha: 1))
+        cursorContext.fill(CGRect(x: 0, y: 0, width: 6, height: 6))
+        let cursorImage = try #require(cursorContext.makeImage())
+        var pointerIsOverPage = true
+        let source = try WebViewCaptureSource(webView: tab.webView) { _, _ in
+            pointerIsOverPage ? WebViewCaptureCursor(image: cursorImage,
+                position: CGPoint(x: 22, y: 32), hotSpot: CGPoint(x: 2, y: 2),
+                size: CGSize(width: 6, height: 6)) : nil
+        }
         defer { source.close(); activity.end(); window.close(); tab.close() }
         let initial = try await source.frame()
         #expect(initial.width == 320 && initial.height == 200)
         let red = try #require(NSBitmapImageRep(cgImage: initial).colorAt(x: 160, y: 100)?.usingColorSpace(.deviceRGB))
         #expect(red.redComponent > 0.9 && red.greenComponent < 0.1)
+        // No valid pointer sample after leaving the page: preserve the overlay
+        // while the page continues updating on an unselected tab.
+        pointerIsOverPage = false
+        let departed = try await source.frame()
+        let held = try #require(NSBitmapImageRep(cgImage: departed).colorAt(x: 21, y: 31)?.usingColorSpace(.deviceRGB))
+        #expect(held.redComponent > 0.9 && held.greenComponent > 0.9 && held.blueComponent > 0.9)
         // Replace the selected tab's view with a different page, as SwiftUI does.
         let otherTab = WKWebView(frame: tab.webView.frame)
         window.contentView = otherTab
@@ -32,6 +49,8 @@ import WebKit
         var changed = false
         for _ in 0..<20 {
             let image = try await source.frame()
+            let cursor = try #require(NSBitmapImageRep(cgImage: image).colorAt(x: 21, y: 31)?.usingColorSpace(.deviceRGB))
+            #expect(cursor.redComponent > 0.9 && cursor.greenComponent > 0.9 && cursor.blueComponent > 0.9)
             let color = try #require(NSBitmapImageRep(cgImage: image).colorAt(x: 160, y: 100)?.usingColorSpace(.deviceRGB))
             if color.greenComponent > 0.9 && color.redComponent < 0.1 && color.blueComponent < 0.1 { changed = true; break }
             try await Task.sleep(for: .milliseconds(25))
@@ -245,8 +264,8 @@ import WebKit
             return live && settings.displaySurface === 'monitor' && settings.width === 64 &&
               metadata && isolated && clonesRemainLive && settings.screenPixelRatio === 2 &&
               supported.displaySurface === true && supported.logicalSurface === true && supported.cursor === true &&
-              settings.cursor === 'never' && capabilities.logicalSurface === true && capabilities.cursor.join(',') === 'never' &&
-              constraints.cursor === 'never' && clonedTrack.readyState === 'ended' && clone.readyState === 'ended' &&
+              settings.cursor === 'always' && capabilities.logicalSurface === true && capabilities.cursor.join(',') === 'always' &&
+              constraints.cursor === 'always' && clonedTrack.readyState === 'ended' && clone.readyState === 'ended' &&
               track.readyState === 'ended' && cleanups.size === 0 &&
               calls.filter(action => action === 'begin').length === 1 &&
               calls.filter(action => action === 'end').length === 1;
