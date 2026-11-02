@@ -4,7 +4,8 @@ import WebKit
 /// This does not alter HTML/CSS, synthesize input, or conceal network identity.
 enum SpoofMode {
   // Keep ownership compatible with earlier versions when replacing installed scripts.
-  static let version = 4
+  static let version = 10
+  static let userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36"
   static let stateKey = "__oasisActivityPrivacy_v2"
   static let marker = "/* Oasis activity privacy"
   static let source = """
@@ -22,20 +23,49 @@ enum SpoofMode {
             existing?.restore();
             w.__oasisRestoreActivityPrivacy_v1?.();
             const patches = [];
+            const cleanups = new Set();
             function patch(object, name, descriptor) {
               const original = Object.getOwnPropertyDescriptor(object, name);
               patches.push({ object, name, original, descriptor: {
                 ...descriptor, configurable: true, enumerable: original?.enumerable ?? false
               }});
             }
+            // Keep JavaScript identity consistent with the HTTP User-Agent.
+            for (const object of [w.Navigator.prototype, w.navigator]) {
+              patch(object, 'userAgent', { get: () => '\(userAgent)' });
+              patch(object, 'appVersion', { get: () => '\(userAgent)'.slice(8) });
+              patch(object, 'platform', { get: () => 'Win32' });
+              patch(object, 'vendor', { get: () => 'Google Inc.' });
+            }
             const proto = w.Document.prototype;
+            let fullscreenElement = null;
             for (const object of [proto, d]) {
               for (const name of ['hidden', 'webkitHidden'])
                 patch(object, name, { get: () => false });
               for (const name of ['visibilityState', 'webkitVisibilityState'])
                 patch(object, name, { get: () => 'visible' });
               patch(object, 'hasFocus', { value: function hasFocus() { return true; }, writable: true });
+              for (const name of ['fullscreenElement', 'webkitFullscreenElement', 'webkitCurrentFullScreenElement'])
+                patch(object, name, { get: () => fullscreenElement?.isConnected ? fullscreenElement : d.documentElement });
+              for (const name of ['fullscreenEnabled', 'webkitFullscreenEnabled', 'webkitIsFullScreen', 'webkitFullScreen'])
+                patch(object, name, { get: () => true });
+              patch(object, 'exitFullscreen', { value: function exitFullscreen() {
+                return w.Promise.resolve();
+              }, writable: true });
+              for (const name of ['webkitExitFullscreen', 'webkitCancelFullScreen'])
+                patch(object, name, { value: function() {}, writable: true });
             }
+            // Page fullscreen requests succeed without entering WebKit's native
+            // fullscreen presentation or changing the browser window.
+            patch(w.Element.prototype, 'requestFullscreen', { value: function requestFullscreen() {
+              fullscreenElement = this;
+              return w.Promise.resolve();
+            }, writable: true });
+            for (const name of ['webkitRequestFullscreen', 'webkitRequestFullScreen'])
+              patch(w.Element.prototype, name, { value: function() {
+                fullscreenElement = this;
+              }, writable: true });
+            \(WindowScreenSharing.source)
             function repair() {
               for (const p of patches) {
                 try { Object.defineProperty(p.object, p.name, p.descriptor); } catch (_) {}
@@ -47,16 +77,18 @@ enum SpoofMode {
                                      'pointerenter', 'pointerleave', 'pointerover', 'pointerout',
                                      'pointercancel', 'lostpointercapture', 'touchcancel']);
             const focus = new Set(['focus', 'blur', 'focusin', 'focusout']);
+            const fullscreen = new Set(['fullscreenchange', 'webkitfullscreenchange',
+                                        'fullscreenerror', 'webkitfullscreenerror']);
             function suppress(event) {
               // Repair after lifecycle transitions, including back/forward-cache restoration.
               if (visibility.has(event.type)) repair();
               // Focus events on controls can also disclose window deactivation.
-              if (visibility.has(event.type) || boundary.has(event.type) || focus.has(event.type)) {
+              if (visibility.has(event.type) || boundary.has(event.type) || focus.has(event.type) || fullscreen.has(event.type)) {
                 event.stopImmediatePropagation();
                 event.stopPropagation();
               }
             }
-            const blocked = new Set([...visibility, ...boundary, ...focus]);
+            const blocked = new Set([...visibility, ...boundary, ...focus, ...fullscreen]);
             const eventProto = w.EventTarget.prototype;
             const nativeAdd = w.__oasisActivityNativeAdd ?? eventProto.addEventListener;
             Object.defineProperty(w, '__oasisActivityNativeAdd', {
@@ -142,9 +174,10 @@ enum SpoofMode {
                 }});
               }
             }
-            const types = [...visibility, ...boundary, ...focus];
+            const types = [...blocked];
             for (const type of types) nativeAdd.call(w, type, suppress, true);
             const state = { version: \(version), document: d, repair, restore() {
+              for (const cleanup of [...cleanups]) cleanup();
               for (const type of types) nativeRemove.call(w, type, suppress, true);
               for (const reference of handlers) {
                 const target = reference.deref();

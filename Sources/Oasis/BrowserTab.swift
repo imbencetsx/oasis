@@ -53,6 +53,7 @@ final class BrowserTab: NSObject, Identifiable, WKNavigationDelegate, WKUIDelega
     @ObservationIgnored private var observations: [NSKeyValueObservation] = []
     @ObservationIgnored private var spoofModeEnabled: Bool
     @ObservationIgnored private let spoofFrames: SpoofFrameCoverage
+    @ObservationIgnored private let windowSharing = WindowScreenSharing()
 
     init(isPrivate: Bool, configuration: WKWebViewConfiguration? = nil, dataStore: WKWebsiteDataStore? = nil, spoofModeEnabled: Bool = false) {
         self.isPrivate = isPrivate
@@ -71,6 +72,8 @@ final class BrowserTab: NSObject, Identifiable, WKNavigationDelegate, WKUIDelega
         spoofFrames.prepare(configuration.userContentController)
         SpoofMode.configure(configuration.userContentController, enabled: spoofModeEnabled)
         let webView = WKWebView(frame: .zero, configuration: configuration)
+        webView.customUserAgent = spoofModeEnabled ? SpoofMode.userAgent : nil
+        windowSharing.attach(webView, enabled: spoofModeEnabled)
         contentView = webView
         webView.obscuredContentInsets = NSEdgeInsets(top: 64, left: 0, bottom: 0, right: 0)
         spoofFrames.attach(webView, enabled: spoofModeEnabled)
@@ -164,7 +167,9 @@ final class BrowserTab: NSObject, Identifiable, WKNavigationDelegate, WKUIDelega
     }
     func setSpoofMode(_ enabled: Bool) {
         spoofModeEnabled = enabled
+        windowSharing.apply(enabled: enabled)
         guard let webView = contentView else { return }
+        webView.customUserAgent = enabled ? SpoofMode.userAgent : nil
         SpoofMode.configure(webView.configuration.userContentController, enabled: enabled)
         spoofFrames.apply(enabled: enabled)
         applySpoofModeToDocument()
@@ -191,6 +196,7 @@ final class BrowserTab: NSObject, Identifiable, WKNavigationDelegate, WKUIDelega
         isClosed = true
         deferredURL = nil
         syncTask?.cancel(); syncTask = nil
+        windowSharing.close()
         spoofFrames.close()
         faviconTask?.cancel()
         contentView?.stopLoading()
@@ -255,6 +261,7 @@ final class BrowserTab: NSObject, Identifiable, WKNavigationDelegate, WKUIDelega
     }
 
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        windowSharing.stop()
         SpoofMode.configure(webView.configuration.userContentController, enabled: spoofModeEnabled)
         errorMessage = nil; showsReader = false; readerContent = nil
         sync()
