@@ -48,6 +48,7 @@ import WebKit
             const w = {
               navigator: {mediaDevices: {}, userActivation: {isActive: true}},
               HTMLCanvasElement, isSecureContext: true, DOMException, TypeError, Image, Event,
+              MediaStreamTrack, MediaStream, crypto, devicePixelRatio: 2,
               setTimeout: window.setTimeout.bind(window), clearTimeout: window.clearTimeout.bind(window),
               webkit: {messageHandlers: {oasisWindowShare: bridge}}
             };
@@ -57,9 +58,32 @@ import WebKit
             const stream = await w.navigator.mediaDevices.getDisplayMedia({video: true});
             const track = stream.getVideoTracks()[0];
             const settings = track.getSettings();
+            const capabilities = track.getCapabilities();
+            const constraints = track.getConstraints();
+            const supported = w.navigator.mediaDevices.getSupportedConstraints();
+            const clone = track.clone();
+            const streamClone = stream.clone().clone();
+            const clonedTrack = streamClone.getVideoTracks()[0];
+            const metadata = [track, clone, clonedTrack].every(value =>
+              value.label === 'Screen 1' && value.getSettings().displaySurface === 'monitor' &&
+              value.getSettings().deviceId === settings.deviceId &&
+              value.getCapabilities().displaySurface === 'monitor' &&
+              value.getConstraints().displaySurface === 'monitor' &&
+              MediaStreamTrack.prototype.getSettings.call(value).displaySurface === 'monitor');
+            const unrelated = fixture.captureStream().getVideoTracks()[0];
+            const isolated = unrelated.getSettings().displaySurface !== 'monitor' && unrelated.label !== 'Screen 1';
+            unrelated.stop();
             const live = track.readyState === 'live' && stream.getAudioTracks().length === 0;
             track.stop(); track.stop();
+            const clonesRemainLive = clone.readyState === 'live' && clonedTrack.readyState === 'live' &&
+              !calls.includes('end');
+            // Native Stop Sharing / mode restoration must stop every remaining clone.
+            for (const cleanup of [...cleanups]) cleanup();
             return live && settings.displaySurface === 'monitor' && settings.width === 64 &&
+              metadata && isolated && clonesRemainLive && settings.screenPixelRatio === 2 &&
+              supported.displaySurface === true && supported.logicalSurface === true && supported.cursor === true &&
+              capabilities.logicalSurface === true && capabilities.cursor.includes('always') &&
+              constraints.cursor === 'always' && clonedTrack.readyState === 'ended' && clone.readyState === 'ended' &&
               track.readyState === 'ended' && cleanups.size === 0 &&
               calls.filter(action => action === 'begin').length === 1 &&
               calls.filter(action => action === 'end').length === 1;
@@ -76,6 +100,7 @@ import WebKit
             const w = {
               navigator: {mediaDevices: {}, userActivation: {isActive: false}},
               HTMLCanvasElement, isSecureContext: true, DOMException, TypeError,
+              MediaStreamTrack, MediaStream,
               webkit: {messageHandlers: {oasisWindowShare: {postMessage: () => {calls++;}}}}
             };
             w.top = w;

@@ -60,9 +60,11 @@ Approve the website prompt and any macOS Screen Recording permission prompt to
 start. The feed contains the browser window, including its sidebar, at up to
 10 frames per second and 1440 pixels wide, without audio. Use **Sharing → Stop
 Sharing** in the macOS menu bar to stop; navigating, closing the tab, or disabling
-Spoof Mode also stops it. In Spoof Mode, the video track reports
-`displaySurface: "monitor"` while the feed continues to contain only the Oasis
-window. Website and server acceptance depends on their other checks.
+Spoof Mode also stops it. In Spoof Mode, shared tracks report monitor metadata
+through settings, capabilities, constraints, and their label (`Screen 1`). Track
+and stream clones retain the same capture-device identity. The feed continues
+to contain only the Oasis window. Website and server acceptance depends on
+their other checks.
 
 History, bookmarks, reading-list entries, spaces, and normal-window snapshots are stored locally in:
 

@@ -7,11 +7,62 @@ import WebKit
 @MainActor final class WindowScreenSharing: NSObject {
     nonisolated static let source = """
         if (w.HTMLCanvasElement.prototype.captureStream) {
+          // Scope the metadata to tracks produced by this bridge. Prototype calls
+          // and native MediaStream.clone() must see the same identity as direct calls.
+          const sharedTracks = new WeakMap();
+          const trackProto = w.MediaStreamTrack.prototype;
+          const nativeSettings = trackProto.getSettings;
+          const nativeCapabilities = trackProto.getCapabilities;
+          const nativeConstraints = trackProto.getConstraints;
+          const nativeClone = trackProto.clone;
+          const nativeStop = trackProto.stop;
+          const nativeStreamClone = w.MediaStream.prototype.clone;
+          const nativeLabel = Object.getOwnPropertyDescriptor(trackProto, 'label');
+          patch(trackProto, 'getSettings', { writable: true, value: function getSettings() {
+            const settings = nativeSettings.call(this), sharing = sharedTracks.get(this);
+            return sharing ? {...settings, ...sharing.settings} : settings;
+          }});
+          patch(trackProto, 'getCapabilities', { writable: true, value: function getCapabilities() {
+            const capabilities = nativeCapabilities.call(this), sharing = sharedTracks.get(this);
+            return sharing ? {...capabilities, displaySurface: 'monitor', logicalSurface: true,
+              cursor: ['always'], deviceId: sharing.settings.deviceId} : capabilities;
+          }});
+          patch(trackProto, 'getConstraints', { writable: true, value: function getConstraints() {
+            const constraints = nativeConstraints.call(this);
+            return sharedTracks.has(this) ? {...constraints, displaySurface: 'monitor',
+              logicalSurface: true, cursor: 'always'} : constraints;
+          }});
+          if (nativeLabel?.get) patch(trackProto, 'label', { get: function() {
+            return sharedTracks.has(this) ? 'Screen 1' : nativeLabel.get.call(this);
+          }});
+          patch(trackProto, 'clone', { writable: true, value: function clone() {
+            const result = nativeClone.call(this), sharing = sharedTracks.get(this);
+            if (sharing) sharing.add(result);
+            return result;
+          }});
+          // Native MediaStream.clone() does not call JavaScript track.clone().
+          patch(w.MediaStream.prototype, 'clone', { writable: true, value: function clone() {
+            const tracks = this.getTracks();
+            return tracks.some(track => sharedTracks.has(track))
+              ? new w.MediaStream(tracks.map(track => track.clone())) : nativeStreamClone.call(this);
+          }});
+          patch(trackProto, 'stop', { writable: true, value: function stop() {
+            nativeStop.call(this);
+            const sharing = sharedTracks.get(this);
+            if (sharing) {
+              sharing.tracks.delete(this);
+              if (!sharing.tracks.size) sharing.finish();
+            }
+          }});
           let mediaDevices = w.navigator.mediaDevices;
           if (!mediaDevices) {
             mediaDevices = {};
             patch(w.navigator, 'mediaDevices', { get: () => mediaDevices });
           }
+          const nativeSupportedConstraints = mediaDevices.getSupportedConstraints;
+          patch(mediaDevices, 'getSupportedConstraints', { writable: true, value: function getSupportedConstraints() {
+            return {...nativeSupportedConstraints?.call(this), displaySurface: true, logicalSurface: true, cursor: true};
+          }});
           patch(mediaDevices, 'getDisplayMedia', { writable: true, value: async function getDisplayMedia(options = {}) {
             if (!w.isSecureContext || w !== w.top)
               throw new w.DOMException('Window sharing requires an HTTPS top-level page.', 'NotAllowedError');
@@ -28,19 +79,20 @@ import WebKit
             canvas.width = info.width; canvas.height = info.height;
             const context = canvas.getContext('2d');
             let stream, track, timer, stopped = false;
+            const tracks = new Set();
             const finish = () => {
               if (stopped) return;
               stopped = true;
               w.clearTimeout(timer);
               cleanups.delete(finish);
-              if (track) {
-                nativeStop.call(track);
-                track.dispatchEvent(new w.Event('ended'));
+              for (const activeTrack of tracks) {
+                nativeStop.call(activeTrack);
+                activeTrack.dispatchEvent(new w.Event('ended'));
               }
+              tracks.clear();
               bridge.postMessage({action: 'end', token: info.token}).catch(() => {});
               canvas.width = canvas.height = 0;
             };
-            let nativeStop;
             cleanups.add(finish);
             const paint = async () => {
               const frame = await bridge.postMessage({action: 'frame', token: info.token});
@@ -55,12 +107,13 @@ import WebKit
               if (stopped) throw new w.DOMException('Window sharing has ended.', 'AbortError');
               stream = canvas.captureStream(10);
               track = stream.getVideoTracks()[0];
-              nativeStop = track.stop;
-              const nativeSettings = track.getSettings.bind(track);
-              Object.defineProperty(track, 'getSettings', { configurable: true, value: () => ({
-                ...nativeSettings(), displaySurface: 'monitor', logicalSurface: true, cursor: 'always'
-              }) });
-              Object.defineProperty(track, 'stop', { configurable: true, value: finish });
+              const sharing = {
+                tracks, finish,
+                settings: {displaySurface: 'monitor', logicalSurface: true, cursor: 'always',
+                  deviceId: w.crypto.randomUUID(), screenPixelRatio: w.devicePixelRatio || 1},
+                add(value) { tracks.add(value); sharedTracks.set(value, sharing); }
+              };
+              sharing.add(track);
               const next = async () => {
                 try { await paint(); }
                 catch (_) { finish(); }
