@@ -32,7 +32,11 @@ struct BrowserWindowHost: View {
     BrowserWindow(session: session)
       .preferredColorScheme(appearance == "Light" ? .light : appearance == "Dark" ? .dark : nil)
       .focusedSceneValue(\.browserSession, session)
-      .background(WindowLifecycleView(showsSidebar: session.showsTabSidebar, reduceMotion: reduceMotion) { session.shutdown() })
+      .background(WindowLifecycleView(
+        showsSidebar: session.showsTabSidebar && !session.isWindowFullscreen,
+        reduceMotion: reduceMotion,
+        onFullscreenChange: { if session.isWindowFullscreen != $0 { session.isWindowFullscreen = $0 } }
+      ) { session.shutdown() })
       .task {
         guard !hasAppeared else { return }
         hasAppeared = true
@@ -58,6 +62,7 @@ struct BrowserWindow: View {
   @Bindable var session: BrowserSession
   @Environment(\.colorScheme) private var colorScheme
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
+  private var showsSidebar: Bool { session.showsTabSidebar && !session.isWindowFullscreen }
   var body: some View {
     ZStack {
       BrowserBackdrop(tab: session.selectedTab)
@@ -68,42 +73,44 @@ struct BrowserWindow: View {
           }
           .frame(width: 224)
           .environment(\.colorScheme, session.selectedTab?.sidebarColorScheme ?? colorScheme)
-          .offset(x: session.showsTabSidebar ? 0 : -224)
-          .opacity(session.showsTabSidebar ? 1 : 0)
-          .frame(width: session.showsTabSidebar ? 224 : 0, alignment: .leading)
+          .offset(x: showsSidebar ? 0 : -224)
+          .opacity(showsSidebar ? 1 : 0)
+          .frame(width: showsSidebar ? 224 : 0, alignment: .leading)
           .clipped()
-          .allowsHitTesting(session.showsTabSidebar)
-          .accessibilityHidden(!session.showsTabSidebar)
+          .allowsHitTesting(showsSidebar)
+          .accessibilityHidden(!showsSidebar)
         ZStack(alignment: .top) {
           BrowserViewport(session: session)
-          if let color = session.selectedTab?.chromeColor {
-            Color(nsColor: color)
-              .frame(height: session.showsFind ? 112 : 64)
-              .allowsHitTesting(false)
-              .accessibilityHidden(true)
-          }
-          // Never put a native drag view beneath an editable field or button.
-          VStack(spacing: 0) {
-            WindowDragArea().frame(height: 10)
-            Color.clear.frame(height: 42).allowsHitTesting(false)
-            WindowDragArea().frame(height: 12)
-          }
-          .frame(height: 64)
-          VStack(spacing: 8) {
-            BrowserChrome(session: session)
-            if session.showsFind, let tab = session.selectedTab, !tab.isBlankPage {
-              FindBar(tab: tab, isPresented: $session.showsFind)
-                .glassEffect(.regular, in: .capsule)
-                .padding(.horizontal, 14)
+          if !session.isWindowFullscreen {
+            if let color = session.selectedTab?.chromeColor {
+              Color(nsColor: color)
+                .frame(height: session.showsFind ? 112 : 64)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
             }
+            // Never put a native drag view beneath an editable field or button.
+            VStack(spacing: 0) {
+              WindowDragArea().frame(height: 10)
+              Color.clear.frame(height: 42).allowsHitTesting(false)
+              WindowDragArea().frame(height: 12)
+            }
+            .frame(height: 64)
+            VStack(spacing: 8) {
+              BrowserChrome(session: session)
+              if session.showsFind, let tab = session.selectedTab, !tab.isBlankPage {
+                FindBar(tab: tab, isPresented: $session.showsFind)
+                  .glassEffect(.regular, in: .capsule)
+                  .padding(.horizontal, 14)
+              }
+            }
+            .environment(\.colorScheme, session.selectedTab?.chromeColorScheme ?? colorScheme)
+            .padding(.top, 12)
+            .padding(.horizontal, 14)
           }
-          .environment(\.colorScheme, session.selectedTab?.chromeColorScheme ?? colorScheme)
-          .padding(.top, 12)
-          .padding(.horizontal, 14)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .clipShape(RoundedRectangle(cornerRadius: BrowserPageFrame.cornerRadius, style: .continuous))
-        .padding(BrowserPageFrame.inset)
+        .clipShape(RoundedRectangle(cornerRadius: session.isWindowFullscreen ? 0 : BrowserPageFrame.cornerRadius, style: .continuous))
+        .padding(session.isWindowFullscreen ? 0 : BrowserPageFrame.inset)
       }
       .animation(reduceMotion ? nil : .spring(duration: 0.36, bounce: 0.08), value: session.showsTabSidebar)
       .allowsHitTesting(!session.showsNewTabSearch)
@@ -149,7 +156,7 @@ struct BrowserViewport: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .accessibilityLabel("Empty Tab")
         } else {
-          WebContentView(tab: tab).id(tab.id)
+          WebContentView(tab: tab, cornerRadius: session.isWindowFullscreen ? 0 : BrowserPageFrame.cornerRadius).id(tab.id)
             .opacity(tab.errorMessage == nil && !tab.showsReader ? 1 : 0)
             .accessibilityHidden(tab.errorMessage != nil || tab.showsReader)
           if let message = tab.errorMessage {
@@ -165,10 +172,10 @@ struct BrowserViewport: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
           }
           if tab.showsReader, let article = tab.readerContent {
-            ReaderView(article: article, tab: tab).padding(.top, 64)
+            ReaderView(article: article, tab: tab).padding(.top, session.isWindowFullscreen ? 0 : 64)
           }
         }
-        if tab.isLoading && !tab.isBlankPage {
+        if tab.isLoading && !tab.isBlankPage && !session.isWindowFullscreen {
           ProgressView(value: max(0.03, tab.progress))
             .tint(Color.oasisAccent)
             .controlSize(.mini)
@@ -180,9 +187,10 @@ struct BrowserViewport: View {
     .frame(maxWidth: .infinity, maxHeight: .infinity)
     .onChange(of: session.selectedID, initial: true) { updateContentInset() }
     .onChange(of: session.showsFind) { updateContentInset() }
+    .onChange(of: session.isWindowFullscreen) { updateContentInset() }
   }
   private func updateContentInset() {
-    session.selectedTab?.setTopInset(session.showsFind ? 112 : 64)
+    session.selectedTab?.setTopInset(session.isWindowFullscreen ? 0 : (session.showsFind ? 112 : 64))
   }
 }
 
@@ -515,19 +523,23 @@ struct AddressBar: View {
 struct WindowLifecycleView: NSViewRepresentable {
   var showsSidebar: Bool
   var reduceMotion: Bool
+  var onFullscreenChange: (Bool) -> Void
   var onClose: () -> Void
   func makeNSView(context: Context) -> CloseObserverView {
     let view = CloseObserverView(onClose: onClose)
+    view.onFullscreenChange = onFullscreenChange
     view.configureTrafficLights(showsSidebar: showsSidebar, reduceMotion: reduceMotion)
     return view
   }
   func updateNSView(_ nsView: CloseObserverView, context: Context) {
     nsView.onClose = onClose
+    nsView.onFullscreenChange = onFullscreenChange
     nsView.configureTrafficLights(showsSidebar: showsSidebar, reduceMotion: reduceMotion)
   }
 }
 final class CloseObserverView: NSView {
   var onClose: () -> Void
+  var onFullscreenChange: (Bool) -> Void = { _ in }
   private var observers: [NSObjectProtocol] = []
   private var trafficLights: WindowTrafficLights?
   private var showsSidebar = true
@@ -551,11 +563,21 @@ final class CloseObserverView: NSView {
     window.isOpaque = false
     window.backgroundColor = .clear
     window.titlebarAppearsTransparent = true
+    Task { @MainActor [weak self, weak window] in
+      guard let self, let window, self.window === window else { return }
+      self.onFullscreenChange(window.styleMask.contains(.fullScreen))
+    }
     trafficLights = WindowTrafficLights(window: window)
     trafficLights?.update(visible: showsSidebar, animated: false)
     observers.append(NotificationCenter.default.addObserver(
       forName: NSWindow.willCloseNotification, object: window, queue: .main
     ) { [weak self] _ in MainActor.assumeIsolated { self?.onClose() } })
+    for (name, fullscreen) in [(NSWindow.didEnterFullScreenNotification, true),
+                               (NSWindow.didExitFullScreenNotification, false)] {
+      observers.append(NotificationCenter.default.addObserver(forName: name, object: window, queue: .main) { [weak self] _ in
+        MainActor.assumeIsolated { self?.onFullscreenChange(fullscreen) }
+      })
+    }
     for name in [NSWindow.didResizeNotification, NSWindow.didEnterFullScreenNotification, NSWindow.didExitFullScreenNotification] {
       observers.append(NotificationCenter.default.addObserver(forName: name, object: window, queue: .main) { [weak self] _ in
         MainActor.assumeIsolated {

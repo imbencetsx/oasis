@@ -4,7 +4,7 @@ cd "$(dirname "$0")/.."
 configuration="${1:-debug}"
 swift build -c "$configuration"
 bin_dir=$(swift build -c "$configuration" --show-bin-path)
-app_dir="$PWD/build/[oasis].app"
+app_dir="${OASIS_APP_DIR:-$PWD/build/[oasis].app}"
 # Recreate generated resources so removed icons/fonts cannot survive old builds.
 rm -rf "$app_dir/Contents/Resources"
 mkdir -p "$app_dir/Contents/MacOS" "$app_dir/Contents/Resources"

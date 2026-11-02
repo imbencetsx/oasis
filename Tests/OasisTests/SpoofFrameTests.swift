@@ -37,6 +37,9 @@ import WebKit
           element.click();
           top.postMessage({tag: document.title, active: !!window.__oasisActivityPrivacy_v2,
             visible: !document.hidden && document.visibilityState === 'visible',
+            fullscreen: document.fullscreenElement === document.documentElement && document.webkitIsFullScreen,
+            browser: navigator.userAgent.includes('Windows NT 10.0') && navigator.userAgent.includes('Chrome/') &&
+              navigator.platform === 'Win32' && navigator.vendor === 'Google Inc.',
             focused: document.hasFocus(), signals, clicks, initial: window.initialSpoof}, '*');
           host.remove();
           for (let i=0;i<frames.length;i++) frames[i].postMessage('probe', '*');
@@ -83,6 +86,8 @@ import WebKit
                 if enabled {
                     #expect(report["visible"] as? Bool == true)
                     #expect(report["focused"] as? Bool == true)
+                    #expect(report["fullscreen"] as? Bool == true)
+                    #expect(report["browser"] as? Bool == true)
                 }
             }
         }
@@ -99,6 +104,104 @@ import WebKit
         }
         let active = try await tab.webView.evaluateJavaScript("reports[0]?.active && reports[0]?.initial && reports[0]?.signals === 0") as? Bool
         #expect(active == true)
+    }
+
+    @Test func browserIdentityFollowsSpoofMode() async throws {
+        let tab = BrowserTab(isPrivate: true, spoofModeEnabled: true)
+        defer { tab.close() }
+        #expect(tab.webView.customUserAgent == SpoofMode.userAgent)
+        tab.webView.loadHTMLString("<title>Browser identity</title>", baseURL: nil)
+        for _ in 0..<100 {
+            if tab.webView.title == "Browser identity" && !tab.webView.isLoading { break }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        try #require(tab.webView.title == "Browser identity")
+        for enabled in [true, false, true, false] {
+            tab.setSpoofMode(enabled)
+            if enabled {
+                #expect(tab.webView.customUserAgent == SpoofMode.userAgent)
+            } else {
+                // WebKit can bridge the cleared override back as an empty string.
+                #expect(tab.webView.customUserAgent?.isEmpty ?? true)
+            }
+            let identity = try await tab.webView.evaluateJavaScript("""
+                ({ua: navigator.userAgent, platform: navigator.platform, vendor: navigator.vendor,
+                  appVersion: navigator.appVersion, own: Object.hasOwn(navigator, 'platform')})
+                """) as? [String: Any]
+            if enabled {
+                #expect(identity?["ua"] as? String == SpoofMode.userAgent)
+                #expect(identity?["platform"] as? String == "Win32")
+                #expect(identity?["vendor"] as? String == "Google Inc.")
+                #expect(identity?["appVersion"] as? String == String(SpoofMode.userAgent.dropFirst(8)))
+            } else {
+                #expect(identity?["ua"] as? String != SpoofMode.userAgent)
+                #expect(identity?["platform"] as? String != "Win32")
+                #expect(identity?["own"] as? Bool == false)
+            }
+        }
+    }
+
+    @Test func fullscreenStaysActiveUntilSpoofModeIsDisabled() async throws {
+        let tab = BrowserTab(isPrivate: true, spoofModeEnabled: false)
+        defer { tab.close() }
+        tab.webView.loadHTMLString("<title>Fullscreen</title><div id='target'></div>", baseURL: nil)
+        for _ in 0..<100 {
+            if tab.webView.title == "Fullscreen" && !tab.webView.isLoading { break }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        try #require(tab.webView.title == "Fullscreen")
+        _ = try await tab.webView.evaluateJavaScript("""
+            window.originalRequest = Element.prototype.requestFullscreen;
+            window.originalExit = document.exitFullscreen;
+            window.originalFullscreen = document.fullscreenElement;
+            window.nativeFullscreen = Object.getOwnPropertyDescriptor(Document.prototype, 'fullscreenElement').get;
+            window.originalWebkitRequest = Element.prototype.webkitRequestFullscreen;
+            window.originalWebkitExit = document.webkitExitFullscreen;
+            window.changes = 0;
+            document.addEventListener('fullscreenchange', () => changes++);
+            """)
+        for _ in 0..<2 {
+            tab.setSpoofMode(true)
+            let active = try await tab.webView.evaluateJavaScript("""
+                document.fullscreenElement === document.documentElement &&
+                document.webkitFullscreenElement === document.documentElement &&
+                document.fullscreenEnabled && document.webkitFullscreenEnabled &&
+                document.webkitIsFullScreen && document.webkitFullScreen
+                """) as? Bool
+            #expect(active == true)
+            let windowed = try await tab.webView.callAsyncJavaScript("""
+                await target.requestFullscreen();
+                const requested = document.fullscreenElement === target;
+                await document.exitFullscreen();
+                document.body.webkitRequestFullscreen();
+                const prefixed = document.fullscreenElement === document.body;
+                target.webkitRequestFullScreen();
+                document.webkitExitFullscreen();
+                document.webkitCancelFullScreen();
+                return requested && prefixed && document.fullscreenElement === target &&
+                    nativeFullscreen.call(document) === originalFullscreen;
+                """, arguments: [:], in: nil, contentWorld: .page) as? Bool
+            #expect(windowed == true)
+            let suppressed = try await tab.webView.evaluateJavaScript("""
+                document.dispatchEvent(new Event('fullscreenchange'));
+                changes === 0 && document.fullscreenElement === target
+                """) as? Bool
+            #expect(suppressed == true)
+            tab.setSpoofMode(false)
+            let restored = try await tab.webView.evaluateJavaScript("""
+                (() => {
+                document.dispatchEvent(new Event('fullscreenchange'));
+                const restored = Element.prototype.requestFullscreen === originalRequest &&
+                    document.exitFullscreen === originalExit && document.fullscreenElement === originalFullscreen &&
+                    !Object.hasOwn(document, 'fullscreenElement') && changes === 1;
+                document.body.innerHTML = '<div id="target"></div>';
+                return restored;
+                })()
+                """) as? Bool
+            #expect(restored == true)
+            // The pre-existing listener resumes after each toggle off.
+            _ = try await tab.webView.evaluateJavaScript("changes = 0")
+        }
     }
 
     @Test func listenersRemainRemovableAndPropertyHandlersRestore() async throws {

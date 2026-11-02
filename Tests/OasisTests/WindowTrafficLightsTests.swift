@@ -12,6 +12,23 @@ import Testing
     return window
   }
 
+  @Test func fullscreenNotificationsFollowOnlyTheirOwnWindow() async {
+    let window = window()
+    let otherWindow = self.window()
+    let observer = CloseObserverView(onClose: {})
+    var changes: [Bool] = []
+    observer.onFullscreenChange = { changes.append($0) }
+    window.contentView = observer
+    defer { window.close(); otherWindow.close() }
+    await Task.yield()
+    changes.removeAll()
+    NotificationCenter.default.post(name: NSWindow.didEnterFullScreenNotification, object: window)
+    NotificationCenter.default.post(name: NSWindow.didExitFullScreenNotification, object: otherWindow)
+    #expect(changes == [true])
+    NotificationCenter.default.post(name: NSWindow.didExitFullScreenNotification, object: window)
+    #expect(changes == [true, false])
+  }
+
   @Test func collapsingHidesAllNativeButtonsAndRestoresTheirPositions() throws {
     let window = window()
     defer { window.close() }

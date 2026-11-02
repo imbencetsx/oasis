@@ -55,6 +55,23 @@ To create an installer:
 
 ## Your data
 
+With Spoof Mode enabled, an HTTPS page can request sharing of its Oasis window.
+Approve the website prompt to start. Capture uses only the current process's
+windows and does not require global macOS Screen Recording permission. The feed
+contains the browser window, including its sidebar, at up to
+10 frames per second and 1440 pixels wide, without audio, cursor, click indicators,
+or child-window overlays. Capture ignores desktop clipping and keeps its
+initial size, scale, and top-left origin; later window resizing crops or pads
+the live image instead of stretching or recentering it. Use **Sharing → Stop
+Sharing** in the macOS menu bar to stop; navigating, closing the tab, or disabling
+Spoof Mode also stops it. Switching apps or desktops keeps the share active;
+temporary capture failures retain the last frame and retry automatically.
+Background scheduling is kept active only while sharing. In Spoof Mode, shared tracks report monitor metadata
+through settings, capabilities, constraints, and their label (`Screen 1`). Track
+and stream clones retain the same capture-device identity. The feed continues
+to contain only the Oasis window. Website and server acceptance depends on
+their other checks.
+
 History, bookmarks, reading-list entries, spaces, and normal-window snapshots are stored locally in:
 
 ```text
@@ -70,6 +87,12 @@ Open `Package.swift` in Xcode, or build and test from the terminal:
 ```bash
 swift test
 swift test -c release
+```
+
+Run the native window-capture regression separately from the other window tests:
+
+```bash
+OASIS_CAPTURE_INTEGRATION=1 swift test --filter WindowScreenSharingTests
 ```
 
 Tests cover navigation and suggestions, library persistence, private storage, spaces, lazy restoration, iframe spoofing, clipboard typing, favicon sizing, and native window controls.
