@@ -1,11 +1,48 @@
 import AppKit
-import ScreenCaptureKit
 import Testing
 import WebKit
 @testable import Oasis
 
 @Suite("Window screen sharing", .serialized)
 @MainActor struct WindowScreenSharingTests {
+    @Test func webViewShareStaysOnItsOriginatingTab() async throws {
+        let tab = try await loadedTab()
+        tab.webView.frame = NSRect(x: 0, y: 0, width: 320, height: 240)
+        tab.setTopInset(40)
+        tab.webView.loadHTMLString("<title>Shared source</title><body style='margin:0;background:rgb(255,0,0)'></body>", baseURL: nil)
+        for _ in 0..<100 {
+            if tab.webView.title == "Shared source" && !tab.webView.isLoading { break }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        let window = NSWindow(contentRect: tab.webView.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = tab.webView
+        let activity = WindowCaptureActivity(preferences: tab.webView.configuration.preferences)
+        let source = try WebViewCaptureSource(webView: tab.webView)
+        defer { source.close(); activity.end(); window.close(); tab.close() }
+        let initial = try await source.frame()
+        #expect(initial.width == 320 && initial.height == 200)
+        let red = try #require(NSBitmapImageRep(cgImage: initial).colorAt(x: 160, y: 100)?.usingColorSpace(.deviceRGB))
+        #expect(red.redComponent > 0.9 && red.greenComponent < 0.1)
+        // Replace the selected tab's view with a different page, as SwiftUI does.
+        let otherTab = WKWebView(frame: tab.webView.frame)
+        window.contentView = otherTab
+        otherTab.loadHTMLString("<body style='background:blue'></body>", baseURL: nil)
+        _ = try await tab.webView.evaluateJavaScript("document.body.style.background = 'rgb(0,255,0)';")
+        var changed = false
+        for _ in 0..<20 {
+            let image = try await source.frame()
+            let color = try #require(NSBitmapImageRep(cgImage: image).colorAt(x: 160, y: 100)?.usingColorSpace(.deviceRGB))
+            if color.greenComponent > 0.9 && color.redComponent < 0.1 && color.blueComponent < 0.1 { changed = true; break }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        #expect(changed)
+        #expect(tab.webView.window !== window)
+        source.prepareForDisplay()
+        window.contentView = tab.webView
+        #expect(tab.webView.window === window)
+    }
+
     @Test func backgroundSchedulingIsRestoredAfterTheLastShare() {
         let preferences = WKPreferences()
         preferences.inactiveSchedulingPolicy = .suspend
@@ -23,7 +60,7 @@ import WebKit
         let tab = try await loadedTab()
         defer { tab.close() }
         let result = try await tab.webView.callAsyncJavaScript("""
-            const d = document, cleanups = new Set(), pending = [];
+            const d = document, cleanups = new Set(), sharingStops = new Map(), pending = [];
             const fixture = d.createElement('canvas');
             fixture.width = 64; fixture.height = 48;
             const image = fixture.toDataURL('image/png');
@@ -66,8 +103,7 @@ import WebKit
     }
 
     @Test func recordingKeepsItsInitialOriginScaleAndSize() throws {
-        let framing = WindowCaptureFraming(contentSize: CGSize(width: 100, height: 80),
-                                           windowSize: CGSize(width: 100, height: 80))
+        let framing = WebViewCaptureFraming(contentSize: CGSize(width: 100, height: 80))
         for size in [CGSize(width: 100, height: 80), CGSize(width: 200, height: 160), CGSize(width: 50, height: 40)] {
             let width = Int(size.width), height = Int(size.height)
             var pixels = [UInt8](repeating: 0, count: width * height * 4)
@@ -94,16 +130,12 @@ import WebKit
             #expect(marker.redComponent > 0.99 && marker.blueComponent < 0.01)
             let corner = try #require(bitmap.colorAt(x: 90, y: 70)?.usingColorSpace(.deviceRGB))
             #expect(corner.blueComponent > 0.99)
-            let configuration = framing.configuration(windowSize: size)
-            #expect(configuration.width == width && configuration.height == height)
-            #expect(!configuration.showsCursor && !configuration.showMouseClicks)
-            #expect(!configuration.includeChildWindows && configuration.ignoreGlobalClipSingleWindow)
+            #expect(framing.scaledSourceSize(size) == size)
         }
     }
 
     @Test func transparentEdgesAndPaddingMatchTheWindowBackground() throws {
-        let framing = WindowCaptureFraming(contentSize: CGSize(width: 100, height: 80),
-                                           windowSize: CGSize(width: 100, height: 80))
+        let framing = WebViewCaptureFraming(contentSize: CGSize(width: 100, height: 80))
         let sourceWidth = 50, sourceHeight = 40
         var pixels = [UInt8](repeating: 0, count: sourceWidth * sourceHeight * 4)
         for y in 0..<sourceHeight {
@@ -127,71 +159,6 @@ import WebKit
             #expect(abs(color.greenComponent - 34.0 / 255) < 0.01)
             #expect(abs(color.blueComponent - 44.0 / 255) < 0.01)
         }
-        #expect(!framing.configuration(windowSize: CGSize(width: 100, height: 80)).shouldBeOpaque)
-    }
-
-    @Test(.enabled(if: ProcessInfo.processInfo.environment["OASIS_CAPTURE_INTEGRATION"] == "1"))
-    func framingSurvivesNativeWindowMovementAndResize() async throws {
-        _ = NSApplication.shared
-        let screen = try #require(NSScreen.main)
-        let window = NSWindow(contentRect: NSRect(x: screen.frame.midX - 160, y: screen.frame.midY - 120,
-                                                  width: 320, height: 240),
-                              styleMask: [.borderless], backing: .buffered, defer: false)
-        window.isReleasedWhenClosed = false
-        window.contentView?.wantsLayer = true
-        window.contentView?.layer?.backgroundColor = NSColor.blue.cgColor
-        let marker = NSView(frame: NSRect(x: 10, y: 210, width: 20, height: 20))
-        marker.wantsLayer = true
-        marker.layer?.backgroundColor = NSColor.red.cgColor
-        marker.autoresizingMask = [.minYMargin]
-        window.contentView?.addSubview(marker)
-        window.orderFront(nil)
-        defer { window.close() }
-        let filter = try await WindowScreenSharing.filterForOwnWindow(window)
-        let framing = WindowCaptureFraming(contentSize: filter.contentRect.size, windowSize: window.frame.size)
-        let initialWidth = framing.width, initialHeight = framing.height
-        for phase in 0..<3 {
-            if phase == 1 {
-                window.setFrameOrigin(NSPoint(x: screen.frame.maxX - 160, y: window.frame.minY))
-            } else if phase == 2 {
-                window.setFrame(NSRect(x: screen.frame.maxX - 320, y: screen.frame.midY - 240,
-                                       width: 640, height: 480), display: true)
-            }
-            let configuration = framing.configuration(windowSize: window.frame.size)
-            let raw = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration)
-            let image = try #require(framing.imageOnFixedCanvas(raw))
-            #expect(image.width == initialWidth && image.height == initialHeight)
-            let bitmap = NSBitmapImageRep(cgImage: image)
-            let red = try #require(bitmap.colorAt(x: 20, y: 20)?.usingColorSpace(.deviceRGB))
-            #expect(red.redComponent > 0.9 && red.blueComponent < 0.1)
-            let blue = try #require(bitmap.colorAt(x: 300, y: 120)?.usingColorSpace(.deviceRGB))
-            #expect(blue.blueComponent > 0.9 && blue.redComponent < 0.1)
-        }
-    }
-
-    // ScreenCaptureKit needs an exclusive WindowServer session; other suites
-    // concurrently create/close native windows. Run this integration test alone.
-    @Test(.enabled(if: ProcessInfo.processInfo.environment["OASIS_CAPTURE_INTEGRATION"] == "1"))
-    func capturesOwnNativeWindow() async throws {
-        _ = NSApplication.shared
-        let window = NSWindow(contentRect: NSRect(x: 80, y: 80, width: 320, height: 240),
-                              styleMask: [.titled], backing: .buffered, defer: false)
-        window.isReleasedWhenClosed = false
-        window.title = "Oasis capture regression test"
-        window.contentView?.wantsLayer = true
-        window.contentView?.layer?.backgroundColor = NSColor.systemBlue.cgColor
-        window.orderFront(nil)
-        defer { window.close() }
-        let filter = try await WindowScreenSharing.filterForOwnWindow(window)
-        #expect(filter.includedWindows.map(\.windowID) == [CGWindowID(window.windowNumber)])
-        let configuration = SCStreamConfiguration()
-        configuration.width = 128
-        configuration.height = 96
-        configuration.capturesAudio = false
-        let image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration)
-        #expect(image.width == 128)
-        #expect(image.height == 96)
-        #expect(image.dataProvider?.data != nil)
     }
 
     private func loadedTab() async throws -> BrowserTab {
@@ -211,6 +178,13 @@ import WebKit
         #expect(try await tab.webView.evaluateJavaScript("typeof navigator.mediaDevices?.getDisplayMedia") as? String == "function")
         tab.setSpoofMode(false)
         #expect(try await tab.webView.evaluateJavaScript("!!navigator.mediaDevices && Object.hasOwn(navigator.mediaDevices, 'getDisplayMedia')") as? Bool == false)
+        let denied = try await tab.webView.callAsyncJavaScript("""
+            try {
+              await window.webkit.messageHandlers.oasisWindowShare.postMessage({action: 'begin'});
+              return false;
+            } catch (error) { return String(error).includes('Spoof Mode'); }
+            """, arguments: [:], in: nil, contentWorld: .page) as? Bool
+        #expect(denied == true)
         tab.setSpoofMode(true)
         #expect(try await tab.webView.evaluateJavaScript("Object.hasOwn(navigator.mediaDevices, 'getDisplayMedia')") as? Bool == true)
     }
@@ -222,7 +196,7 @@ import WebKit
         // source. Native OS permission prompts are deliberately outside this test.
         let result = try await tab.webView.callAsyncJavaScript("""
             const d = document;
-            const cleanups = new Set();
+            const cleanups = new Set(), sharingStops = new Map();
             const calls = [];
             const fixture = d.createElement('canvas');
             fixture.width = 64; fixture.height = 48;
@@ -284,7 +258,7 @@ import WebKit
         let tab = try await loadedTab()
         defer { tab.close() }
         let result = try await tab.webView.callAsyncJavaScript("""
-            const d = document, cleanups = new Set();
+            const d = document, cleanups = new Set(), sharingStops = new Map();
             let calls = 0;
             const w = {
               navigator: {mediaDevices: {}, userActivation: {isActive: false}},

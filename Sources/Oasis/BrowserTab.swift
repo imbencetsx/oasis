@@ -183,6 +183,7 @@ final class BrowserTab: NSObject, Identifiable, WKNavigationDelegate, WKUIDelega
         let insets = NSEdgeInsets(top: topInset, left: 0, bottom: 0, right: 0)
         if webView.obscuredContentInsets.top != topInset { webView.obscuredContentInsets = insets }
     }
+    func prepareForDisplay() { windowSharing.prepareForDisplay() }
     func goBack() { showsReader = false; errorMessage = nil; isHistoryNavigation = true; webView.goBack() }
     func goForward() { showsReader = false; errorMessage = nil; isHistoryNavigation = true; webView.goForward() }
     func reload() {
@@ -419,6 +420,7 @@ struct WebContentView: NSViewRepresentable {
     let tab: BrowserTab
     var cornerRadius: CGFloat = BrowserPageFrame.cornerRadius
     func makeNSView(context: Context) -> WKWebView {
+        tab.prepareForDisplay()
         roundCorners(tab.webView)
         return tab.webView
     }

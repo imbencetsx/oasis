@@ -23,7 +23,7 @@ import WebKit
             preferences.inactiveSchedulingPolicy = .none
         }
         activity = ProcessInfo.processInfo.beginActivity(options: .userInitiatedAllowingIdleSystemSleep,
-                                                        reason: "Sharing an Oasis window")
+                                                        reason: "Sharing an Oasis tab")
     }
 
     func end() {

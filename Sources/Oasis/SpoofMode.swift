@@ -4,7 +4,7 @@ import WebKit
 /// This does not alter HTML/CSS, synthesize input, or conceal network identity.
 enum SpoofMode {
   // Keep ownership compatible with earlier versions when replacing installed scripts.
-  static let version = 13
+  static let version = 14
   static let userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36"
   static let stateKey = "__oasisActivityPrivacy_v2"
   static let marker = "/* Oasis activity privacy"
@@ -24,6 +24,7 @@ enum SpoofMode {
             w.__oasisRestoreActivityPrivacy_v1?.();
             const patches = [];
             const cleanups = new Set();
+            const sharingStops = new Map();
             function patch(object, name, descriptor) {
               const original = Object.getOwnPropertyDescriptor(object, name);
               patches.push({ object, name, original, descriptor: {
@@ -176,7 +177,8 @@ enum SpoofMode {
             }
             const types = [...blocked];
             for (const type of types) nativeAdd.call(w, type, suppress, true);
-            const state = { version: \(version), document: d, repair, restore() {
+            const state = { version: \(version), document: d, repair,
+              stopSharing(token) { sharingStops.get(token)?.(); }, restore() {
               for (const cleanup of [...cleanups]) cleanup();
               for (const type of types) nativeRemove.call(w, type, suppress, true);
               for (const reference of handlers) {
