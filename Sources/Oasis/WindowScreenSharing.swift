@@ -96,14 +96,19 @@ import WebKit
             cleanups.add(finish);
             const paint = async () => {
               const frame = await bridge.postMessage({action: 'frame', token: info.token});
-              if (stopped) return;
+              if (stopped) return false;
+              if (frame?.ended) { finish(); return false; }
+              // WindowServer can temporarily have no frame during a Space or
+              // occlusion transition. Keep the canvas's last image and retry.
+              if (frame?.retry) return false;
               const image = new w.Image();
               image.src = frame;
               await image.decode();
               if (!stopped) context.drawImage(image, 0, 0, canvas.width, canvas.height);
+              return !stopped;
             };
             try {
-              await paint();
+              if (!await paint()) throw new w.DOMException('The initial window frame is unavailable.', 'AbortError');
               if (stopped) throw new w.DOMException('Window sharing has ended.', 'AbortError');
               stream = canvas.captureStream(10);
               track = stream.getVideoTracks()[0];
@@ -115,9 +120,10 @@ import WebKit
               };
               sharing.add(track);
               const next = async () => {
-                try { await paint(); }
-                catch (_) { finish(); }
-                if (!stopped) timer = w.setTimeout(next, 100);
+                let updated = false;
+                try { updated = await paint(); }
+                catch (_) { /* A transient bridge/capture/decode error must not end the stream. */ }
+                if (!stopped) timer = w.setTimeout(next, updated ? 100 : 500);
               };
               timer = w.setTimeout(next, 100);
               return stream;
@@ -136,6 +142,7 @@ import WebKit
     private var statusItem: NSStatusItem?
     private var busy = false
     private var requesting = false
+    private var activity: WindowCaptureActivity?
 
     func attach(_ webView: WKWebView, enabled: Bool) {
         self.webView = webView
@@ -152,6 +159,8 @@ import WebKit
 
     @objc func stop() {
         generation = UUID()
+        activity?.end()
+        activity = nil
         token = nil
         filter = nil
         framing = nil
@@ -213,6 +222,7 @@ import WebKit
             self.filter = filter
             self.framing = framing
             captureWindow = window
+            activity = WindowCaptureActivity(preferences: webView.configuration.preferences)
             let token = UUID().uuidString
             self.token = token
             let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -226,6 +236,7 @@ import WebKit
             statusItem = item
             return ["token": token, "width": framing.width, "height": framing.height]
         }
+        if action == "frame", token == nil || body["token"] != token { return ["ended": true] }
         guard let token, body["token"] == token else { throw ShareError.message("Window sharing has ended.") }
         if action == "end" { stop(); return true }
         guard action == "frame", !busy, let filter, let framing, let captureWindow else {
@@ -234,7 +245,13 @@ import WebKit
         busy = true
         defer { busy = false }
         let configuration = framing.configuration(windowSize: captureWindow.frame.size)
-        let image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration)
+        let image: CGImage
+        do {
+            image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration)
+        } catch {
+            guard self.token == token, enabled else { return ["ended": true] }
+            return ["retry": true]
+        }
         guard self.token == token, enabled else { throw ShareError.message("Window sharing has ended.") }
         let data = await Task.detached(priority: .userInitiated) {
             framing.imageOnFixedCanvas(image).flatMap {
@@ -274,6 +291,9 @@ import WebKit
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage,
                                replyHandler: @escaping @MainActor (Any?, String?) -> Void) {
         guard let webView = message.webView, let client = clients.object(forKey: webView) else {
+            if (message.body as? [String: String])?["action"] == "frame" {
+                replyHandler(["ended": true], nil); return
+            }
             replyHandler(nil, "The browser tab is closed."); return
         }
         Task { @MainActor in

@@ -64,7 +64,9 @@ or child-window overlays. Capture ignores desktop clipping and keeps its
 initial size, scale, and top-left origin; later window resizing crops or pads
 the live image instead of stretching or recentering it. Use **Sharing → Stop
 Sharing** in the macOS menu bar to stop; navigating, closing the tab, or disabling
-Spoof Mode also stops it. In Spoof Mode, shared tracks report monitor metadata
+Spoof Mode also stops it. Switching apps or desktops keeps the share active;
+temporary capture failures retain the last frame and retry automatically.
+Background scheduling is kept active only while sharing. In Spoof Mode, shared tracks report monitor metadata
 through settings, capabilities, constraints, and their label (`Screen 1`). Track
 and stream clones retain the same capture-device identity. The feed continues
 to contain only the Oasis window. Website and server acceptance depends on

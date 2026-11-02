@@ -4,7 +4,7 @@ import WebKit
 /// This does not alter HTML/CSS, synthesize input, or conceal network identity.
 enum SpoofMode {
   // Keep ownership compatible with earlier versions when replacing installed scripts.
-  static let version = 12
+  static let version = 13
   static let userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36"
   static let stateKey = "__oasisActivityPrivacy_v2"
   static let marker = "/* Oasis activity privacy"

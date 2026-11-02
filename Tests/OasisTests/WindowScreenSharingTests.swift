@@ -6,6 +6,65 @@ import WebKit
 
 @Suite("Window screen sharing", .serialized)
 @MainActor struct WindowScreenSharingTests {
+    @Test func backgroundSchedulingIsRestoredAfterTheLastShare() {
+        let preferences = WKPreferences()
+        preferences.inactiveSchedulingPolicy = .suspend
+        let first = WindowCaptureActivity(preferences: preferences)
+        let second = WindowCaptureActivity(preferences: preferences)
+        #expect(preferences.inactiveSchedulingPolicy == .none)
+        first.end()
+        first.end()
+        #expect(preferences.inactiveSchedulingPolicy == .none)
+        second.end()
+        #expect(preferences.inactiveSchedulingPolicy == .suspend)
+    }
+
+    @Test func temporaryFrameFailuresKeepSharingAliveAndRecover() async throws {
+        let tab = try await loadedTab()
+        defer { tab.close() }
+        let result = try await tab.webView.callAsyncJavaScript("""
+            const d = document, cleanups = new Set(), pending = [];
+            const fixture = d.createElement('canvas');
+            fixture.width = 64; fixture.height = 48;
+            const image = fixture.toDataURL('image/png');
+            let frames = 0, ended = 0, mode = 'live';
+            const bridge = {postMessage: async body => {
+              if (body.action === 'begin') return {token: 'fixture', width: 64, height: 48};
+              if (body.action === 'end') { ended++; return true; }
+              frames++;
+              if (mode === 'retry') return {retry: true};
+              if (mode === 'error') throw new Error('WindowServer is switching desktops');
+              if (mode === 'ended') return {ended: true};
+              return image;
+            }};
+            const w = {
+              navigator: {mediaDevices: {}, userActivation: {isActive: true}},
+              HTMLCanvasElement, MediaStreamTrack, MediaStream, crypto, Image, Event, DOMException, TypeError,
+              isSecureContext: true, devicePixelRatio: 1,
+              setTimeout: callback => { pending.push(callback); return pending.length; }, clearTimeout: () => {},
+              webkit: {messageHandlers: {oasisWindowShare: bridge}}
+            };
+            w.top = w;
+            const patch = (object, name, descriptor) => Object.defineProperty(object, name, {...descriptor, configurable: true});
+            \(WindowScreenSharing.source)
+            const stream = await w.navigator.mediaDevices.getDisplayMedia({video: true});
+            const track = stream.getVideoTracks()[0];
+            let trackEnds = 0;
+            track.addEventListener('ended', () => trackEnds++);
+            for (const transient of ['retry', 'error', 'retry', 'live']) {
+              mode = transient;
+              await pending.shift()();
+              if (track.readyState !== 'live' || ended || trackEnds || pending.length !== 1) return false;
+            }
+            const recovered = frames === 5;
+            mode = 'ended';
+            await pending.shift()();
+            return recovered && track.readyState === 'ended' && ended === 1 && trackEnds === 1 &&
+              pending.length === 0 && cleanups.size === 0;
+            """, arguments: [:], in: nil, contentWorld: .page) as? Bool
+        #expect(result == true)
+    }
+
     @Test func recordingKeepsItsInitialOriginScaleAndSize() throws {
         let framing = WindowCaptureFraming(contentSize: CGSize(width: 100, height: 80),
                                            windowSize: CGSize(width: 100, height: 80))
