@@ -25,12 +25,12 @@ import WebKit
           patch(trackProto, 'getCapabilities', { writable: true, value: function getCapabilities() {
             const capabilities = nativeCapabilities.call(this), sharing = sharedTracks.get(this);
             return sharing ? {...capabilities, displaySurface: 'monitor', logicalSurface: true,
-              cursor: ['always'], deviceId: sharing.settings.deviceId} : capabilities;
+              cursor: ['never'], deviceId: sharing.settings.deviceId} : capabilities;
           }});
           patch(trackProto, 'getConstraints', { writable: true, value: function getConstraints() {
             const constraints = nativeConstraints.call(this);
             return sharedTracks.has(this) ? {...constraints, displaySurface: 'monitor',
-              logicalSurface: true, cursor: 'always'} : constraints;
+              logicalSurface: true, cursor: 'never'} : constraints;
           }});
           if (nativeLabel?.get) patch(trackProto, 'label', { get: function() {
             return sharedTracks.has(this) ? 'Screen 1' : nativeLabel.get.call(this);
@@ -109,7 +109,7 @@ import WebKit
               track = stream.getVideoTracks()[0];
               const sharing = {
                 tracks, finish,
-                settings: {displaySurface: 'monitor', logicalSurface: true, cursor: 'always',
+                settings: {displaySurface: 'monitor', logicalSurface: true, cursor: 'never',
                   deviceId: w.crypto.randomUUID(), screenPixelRatio: w.devicePixelRatio || 1},
                 add(value) { tracks.add(value); sharedTracks.set(value, sharing); }
               };
@@ -131,7 +131,8 @@ import WebKit
     private var generation = UUID()
     private var token: String?
     private var filter: SCContentFilter?
-    private var configuration: SCStreamConfiguration?
+    private var framing: WindowCaptureFraming?
+    private weak var captureWindow: NSWindow?
     private var statusItem: NSStatusItem?
     private var busy = false
     private var requesting = false
@@ -153,7 +154,8 @@ import WebKit
         generation = UUID()
         token = nil
         filter = nil
-        configuration = nil
+        framing = nil
+        captureWindow = nil
         if let statusItem { NSStatusBar.system.removeStatusItem(statusItem) }
         statusItem = nil
     }
@@ -163,6 +165,15 @@ import WebKit
         if let webView { dispatcher?.remove(webView) }
         webView = nil
         dispatcher = nil
+    }
+
+    static func filterForOwnWindow(_ window: NSWindow) async throws -> SCContentFilter {
+        // Own-process capture does not depend on a global Screen Recording grant.
+        let content = try await SCShareableContent.currentProcess
+        guard let source = content.windows.first(where: { $0.windowID == CGWindowID(window.windowNumber) }) else {
+            throw ShareError.message("The Oasis window is no longer available.")
+        }
+        return SCContentFilter(desktopIndependentWindow: source)
     }
 
     fileprivate func receive(_ message: WKScriptMessage) async throws -> Any {
@@ -191,20 +202,17 @@ import WebKit
             guard response == .alertSecondButtonReturn, enabled, generation == requestGeneration else {
                 throw ShareError.message("Window sharing was cancelled.")
             }
-            let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
-            guard enabled, generation == requestGeneration,
-                  let source = content.windows.first(where: { $0.windowID == CGWindowID(window.windowNumber) }) else {
-                throw ShareError.message("The Oasis window is no longer available.")
+            // Only this process's windows are needed. Enumerating all apps asks
+            // for global Screen Recording access, whose ad-hoc identity expires
+            // after a rebuild. Own-process capture needs no global TCC grant.
+            let filter = try await Self.filterForOwnWindow(window)
+            guard enabled, generation == requestGeneration else {
+                throw ShareError.message("Window sharing was cancelled.")
             }
-            let configuration = SCStreamConfiguration()
-            // Bound bridge bandwidth while preserving the entire window's aspect ratio.
-            let scale = min(1, 1440 / max(1, source.frame.width))
-            configuration.width = max(2, Int(source.frame.width * scale))
-            configuration.height = max(2, Int(source.frame.height * scale))
-            configuration.showsCursor = true
-            configuration.ignoreShadowsSingleWindow = true
-            self.filter = SCContentFilter(desktopIndependentWindow: source)
-            self.configuration = configuration
+            let framing = WindowCaptureFraming(contentSize: filter.contentRect.size, windowSize: window.frame.size)
+            self.filter = filter
+            self.framing = framing
+            captureWindow = window
             let token = UUID().uuidString
             self.token = token
             let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -216,19 +224,22 @@ import WebKit
             stopItem.target = self
             item.menu = menu
             statusItem = item
-            return ["token": token, "width": configuration.width, "height": configuration.height]
+            return ["token": token, "width": framing.width, "height": framing.height]
         }
         guard let token, body["token"] == token else { throw ShareError.message("Window sharing has ended.") }
         if action == "end" { stop(); return true }
-        guard action == "frame", !busy, let filter, let configuration else {
+        guard action == "frame", !busy, let filter, let framing, let captureWindow else {
             throw ShareError.message("A window frame is not available.")
         }
         busy = true
         defer { busy = false }
+        let configuration = framing.configuration(windowSize: captureWindow.frame.size)
         let image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration)
         guard self.token == token, enabled else { throw ShareError.message("Window sharing has ended.") }
         let data = await Task.detached(priority: .userInitiated) {
-            NSBitmapImageRep(cgImage: image).representation(using: .jpeg, properties: [.compressionFactor: 0.7])
+            framing.imageOnFixedCanvas(image).flatMap {
+                NSBitmapImageRep(cgImage: $0).representation(using: .jpeg, properties: [.compressionFactor: 0.7])
+            }
         }.value
         guard self.token == token, enabled else { throw ShareError.message("Window sharing has ended.") }
         guard let data else {

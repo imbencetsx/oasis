@@ -417,16 +417,18 @@ struct ReaderContent { var title: String; var text: String }
 
 struct WebContentView: NSViewRepresentable {
     let tab: BrowserTab
+    var cornerRadius: CGFloat = BrowserPageFrame.cornerRadius
     func makeNSView(context: Context) -> WKWebView {
         roundCorners(tab.webView)
         return tab.webView
     }
     func updateNSView(_ nsView: WKWebView, context: Context) {
         tab.updateWebsiteAppearance()
+        roundCorners(nsView)
     }
     private func roundCorners(_ webView: WKWebView) {
         webView.wantsLayer = true
-        webView.layer?.cornerRadius = BrowserPageFrame.cornerRadius
+        webView.layer?.cornerRadius = cornerRadius
         webView.layer?.cornerCurve = .continuous
         webView.layer?.masksToBounds = true
     }

@@ -10,6 +10,7 @@ final class BrowserSession: Identifiable {
   var tabs: [BrowserTab] = []
   var selectedID: UUID?
   var showsTabSidebar = true
+  var isWindowFullscreen = false
   var showsLibraryPanel = false
   var sidebarSection: SidebarSection = .bookmarks
   var showsDownloads = false
