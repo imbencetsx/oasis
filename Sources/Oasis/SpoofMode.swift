@@ -4,7 +4,7 @@ import WebKit
 /// This does not alter HTML/CSS, synthesize input, or conceal network identity.
 enum SpoofMode {
   // Keep ownership compatible with earlier versions when replacing installed scripts.
-  static let version = 15
+  static let version = 16
   static let userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36"
   static let stateKey = "__oasisActivityPrivacy_v2"
   static let marker = "/* Oasis activity privacy"
@@ -66,6 +66,34 @@ enum SpoofMode {
               patch(w.Element.prototype, name, { value: function() {
                 fullscreenElement = this;
               }, writable: true });
+            // Fullscreen heuristics also compare the viewport with the available
+            // display and browser frame. Keep these values live across resizes.
+            for (const object of [w.Screen.prototype, w.screen]) {
+              for (const name of ['width', 'availWidth'])
+                patch(object, name, { get: () => w.innerWidth });
+              for (const name of ['height', 'availHeight'])
+                patch(object, name, { get: () => w.innerHeight });
+              for (const name of ['availLeft', 'availTop', 'left', 'top'])
+                patch(object, name, { get: () => 0 });
+              patch(object, 'isExtended', { get: () => false });
+            }
+            for (const [name, value] of Object.entries({
+              outerWidth: () => w.innerWidth, outerHeight: () => w.innerHeight,
+              screenX: () => 0, screenY: () => 0, screenLeft: () => 0,
+              screenTop: () => 0, fullScreen: () => true
+            })) patch(w, name, { get: value });
+            const mediaProto = w.MediaQueryList?.prototype;
+            const nativeMatches = mediaProto && Object.getOwnPropertyDescriptor(mediaProto, 'matches')?.get;
+            const nativeMatchMedia = w.matchMedia;
+            if (nativeMatches && nativeMatchMedia) {
+              patch(mediaProto, 'matches', { get: function() {
+                const query = this.media.replace(
+                  /\\(\\s*display-mode\\s*:\\s*([a-z-]+)\\s*\\)/gi,
+                  (_, mode) => mode.toLowerCase() === 'fullscreen' ? '(min-width: 0px)' : '(max-width: -1px)');
+                return query === this.media ? nativeMatches.call(this)
+                  : nativeMatches.call(nativeMatchMedia.call(w, query));
+              }});
+            }
             \(WindowScreenSharing.source)
             function repair() {
               for (const p of patches) {

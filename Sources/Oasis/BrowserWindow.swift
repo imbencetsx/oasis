@@ -10,7 +10,7 @@ extension Color {
   static let oasisAccent = Color(
     nsColor: NSColor(name: nil) { appearance in
       if appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua {
-        return NSColor(red: 1, green: 0.38, blue: 0.42, alpha: 1)
+        return .white
       }
       return NSColor(red: 0.76, green: 0.12, blue: 0.20, alpha: 1)
     })

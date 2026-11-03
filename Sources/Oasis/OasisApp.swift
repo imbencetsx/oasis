@@ -49,7 +49,7 @@ struct BrowserCommands: Commands {
     @Environment(\.openWindow) private var openWindow
     var body: some Commands {
         CommandGroup(replacing: .newItem) {
-            Button("New Tab") { session?.openNewTabSearch() }.keyboardShortcut("t").disabled(session == nil)
+            Button("New Tab") { session?.showsNewTabSearch.toggle() }.keyboardShortcut("t").disabled(session == nil)
             Button("New Window") { openWindow(value: BrowserWindowRequest()) }.keyboardShortcut("n")
             Button("New Private Window") { openWindow(value: BrowserWindowRequest(isPrivate: true)) }
                 .keyboardShortcut("n", modifiers: [.command, .shift])
