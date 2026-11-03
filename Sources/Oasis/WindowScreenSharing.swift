@@ -96,7 +96,12 @@ import WebKit
             cleanups.add(finish);
             sharingStops.set(info.token, finish);
             let cursorImage = null, cursorURL = '';
-            let cachedImage = null;
+            let cachedImage = null, cachedCursor = null;
+            const drawCursor = () => {
+              if (cachedCursor && cursorImage && !stopped) {
+                context.drawImage(cursorImage, cachedCursor.x, cachedCursor.y, cachedCursor.width, cachedCursor.height);
+              }
+            };
             const paint = async () => {
               const frame = await bridge.postMessage({action: 'frame', token: info.token});
               if (stopped) return false;
@@ -106,6 +111,7 @@ import WebKit
               if (frame?.retry) {
                 if (cachedImage && !stopped) {
                   context.drawImage(cachedImage, 0, 0, canvas.width, canvas.height);
+                  drawCursor();
                   return true;
                 }
                 return false;
@@ -124,13 +130,13 @@ import WebKit
               }
               // Overlay cursor
               if (frame?.cursor) {
-                const cursor = frame.cursor;
-                if (cursor.image !== cursorURL) {
-                  cursorImage = new w.Image(); cursorImage.src = cursor.image;
-                  await cursorImage.decode(); cursorURL = cursor.image;
+                cachedCursor = frame.cursor;
+                if (cachedCursor.image !== cursorURL) {
+                  cursorImage = new w.Image(); cursorImage.src = cachedCursor.image;
+                  await cursorImage.decode(); cursorURL = cachedCursor.image;
                 }
-                if (!stopped && cursorImage) context.drawImage(cursorImage, cursor.x, cursor.y, cursor.width, cursor.height);
               }
+              drawCursor();
               return !stopped;
             };
             try {

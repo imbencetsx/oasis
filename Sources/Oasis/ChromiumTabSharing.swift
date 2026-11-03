@@ -141,10 +141,14 @@ import CefKit
     private func updateCursor(_ host: ChromiumPageHost) {
         guard let tab = engine?.tab, tab.session?.selectedID == tab.id,
               tab.session?.showsNewTabSearch != true, !tab.showsReader,
-              NSApp.isActive, let window = host.window, window.isKeyWindow, window.isVisible, window.attachedSheet == nil,
+              NSApp.isActive, let window = host.window, window !== engine?.captureWindow,
+              window.isKeyWindow, window.isVisible, window.attachedSheet == nil,
               window.isOnActiveSpace, !window.isMiniaturized, !host.isHiddenOrHasHiddenAncestor else { return }
         let point = host.convert(window.convertPoint(fromScreen: NSEvent.mouseLocation), from: nil)
-        guard host.pageBounds.contains(point) else { return }
+        guard host.pageBounds.contains(point), host.visibleRect.contains(point),
+              let root = window.contentView else { return }
+        let rootPoint = root.superview?.convert(point, from: host) ?? host.convert(point, to: nil)
+        guard let hit = root.hitTest(rootPoint), hit === host || hit.isDescendant(of: host) else { return }
         let current = NSCursor.current
         if cursorImage !== current.image,
            let tiff = current.image.tiffRepresentation,

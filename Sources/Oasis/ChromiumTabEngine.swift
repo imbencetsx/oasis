@@ -17,7 +17,7 @@ import SwiftUI
     private var mainFrameID = ""
     private var mainContexts: Set<Int> = []
     private var certificateFailedURL: URL?
-    private var captureWindow: NSWindow?
+    private(set) var captureWindow: NSWindow?
     private var historyEntries: [ChromiumHistoryEntry] = []
     private var historyIndex = 0
     lazy var sharing = ChromiumTabSharing(engine: self)
@@ -183,6 +183,7 @@ import SwiftUI
 
     func prepareCaptureSurface() async throws {
         guard let browser else { throw failure("The Chromium page is closed.") }
+        guard tab?.session?.selectedID != tab?.id else { return }
         if host.window == nil {
             let size = host.lastVisibleSize
             let window = NSWindow(contentRect: CGRect(origin: .zero, size: size),
