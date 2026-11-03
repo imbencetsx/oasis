@@ -94,7 +94,7 @@ import WebKit
         }
         if wasAway[id] == true, let lastPoint = lastScreenPoints[id] {
             wasAway[id] = false
-            if let primary = NSScreen.screens.first {
+            if ScreenRecordingDetector.isRecordingActive(for: nil), let primary = NSScreen.screens.first {
                 let quartzPoint = CGPoint(x: lastPoint.x, y: primary.frame.maxY - lastPoint.y)
                 CGWarpMouseCursorPosition(quartzPoint)
             }

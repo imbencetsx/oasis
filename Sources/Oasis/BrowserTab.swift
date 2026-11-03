@@ -57,6 +57,67 @@ final class BrowserTab: NSObject, Identifiable, WKNavigationDelegate, WKUIDelega
     @ObservationIgnored private var spoofModeEnabled: Bool
     @ObservationIgnored private let spoofFrames: SpoofFrameCoverage
     @ObservationIgnored private let windowSharing = WindowScreenSharing()
+    @ObservationIgnored private var lastInsideScreenPoint: CGPoint?
+    @ObservationIgnored private var wasAway = false
+
+    var isSharing: Bool {
+        if let chromium { return chromium.sharing.isSharing }
+        return windowSharing.isSharing
+    }
+
+    func restoreCursorIfReturning() {
+        guard ScreenRecordingDetector.isRecordingActive(for: self),
+              let session, session.selectedID == id,
+              !session.showsNewTabSearch, !showsReader,
+              NSApp.isActive, let window = renderView.window,
+              window.isKeyWindow, window.isVisible,
+              window.attachedSheet == nil, window.isOnActiveSpace, !window.isMiniaturized,
+              !renderView.isHiddenOrHasHiddenAncestor, wasAway, let lastPoint = lastInsideScreenPoint else { return }
+        wasAway = false
+        if let primary = NSScreen.screens.first {
+            let quartzPoint = CGPoint(x: lastPoint.x, y: primary.frame.maxY - lastPoint.y)
+            CGWarpMouseCursorPosition(quartzPoint)
+        }
+    }
+
+    func updateCursorTracking() {
+        guard ScreenRecordingDetector.isRecordingActive(for: self) else {
+            wasAway = false
+            lastInsideScreenPoint = nil
+            return
+        }
+        guard let session, session.selectedID == id,
+              !session.showsNewTabSearch, !showsReader,
+              NSApp.isActive, let window = renderView.window,
+              window.isKeyWindow, window.isVisible,
+              window.attachedSheet == nil, window.isOnActiveSpace, !window.isMiniaturized,
+              !renderView.isHiddenOrHasHiddenAncestor else {
+            wasAway = true
+            return
+        }
+        let mouseLocation = NSEvent.mouseLocation
+        let point = renderView.convert(window.convertPoint(fromScreen: mouseLocation), from: nil)
+        guard renderView.bounds.contains(point), renderView.visibleRect.contains(point),
+              let root = window.contentView else {
+            wasAway = true
+            return
+        }
+        let rootPoint = root.superview?.convert(point, from: renderView) ?? renderView.convert(point, to: nil)
+        guard let hit = root.hitTest(rootPoint), hit === renderView || hit.isDescendant(of: renderView) else {
+            wasAway = true
+            return
+        }
+        if wasAway, let lastPoint = lastInsideScreenPoint {
+            wasAway = false
+            if let primary = NSScreen.screens.first {
+                let quartzPoint = CGPoint(x: lastPoint.x, y: primary.frame.maxY - lastPoint.y)
+                CGWarpMouseCursorPosition(quartzPoint)
+            }
+            return
+        }
+        wasAway = false
+        lastInsideScreenPoint = mouseLocation
+    }
 
     init(isPrivate: Bool, configuration: WKWebViewConfiguration? = nil, dataStore: WKWebsiteDataStore? = nil, spoofModeEnabled: Bool = false, chromiumProfile: CefProfile? = nil) {
         self.isPrivate = isPrivate

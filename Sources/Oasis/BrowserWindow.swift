@@ -143,7 +143,25 @@ struct BrowserWindow: View {
     .onChange(of: session.library.storageError) { _, error in
       if let error { session.notice = error }
     }
-    .onAppear { if let error = session.library.storageError { session.notice = error } }
+    .onAppear {
+      if let error = session.library.storageError { session.notice = error }
+      installCursorTrackingMonitor(for: session)
+    }
+  }
+}
+
+@MainActor
+private var cursorMonitorInstalled = false
+
+@MainActor
+private func installCursorTrackingMonitor(for session: BrowserSession) {
+  guard !cursorMonitorInstalled else { return }
+  cursorMonitorInstalled = true
+  NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged]) { event in
+    if let tab = session.selectedTab, ScreenRecordingDetector.isRecordingActive(for: tab) {
+      tab.updateCursorTracking()
+    }
+    return event
   }
 }
 
@@ -188,13 +206,13 @@ struct BrowserViewport: View {
     .frame(maxWidth: .infinity, maxHeight: .infinity)
     .onChange(of: session.selectedID, initial: true) {
       updateContentInset()
-      session.selectedTab?.chromium?.sharing.restoreCursorIfReturning()
+      session.selectedTab?.restoreCursorIfReturning()
     }
     .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { _ in
-      session.selectedTab?.chromium?.sharing.restoreCursorIfReturning()
+      session.selectedTab?.restoreCursorIfReturning()
     }
     .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-      session.selectedTab?.chromium?.sharing.restoreCursorIfReturning()
+      session.selectedTab?.restoreCursorIfReturning()
     }
     .onChange(of: session.showsFind) { updateContentInset() }
     .onChange(of: session.isWindowFullscreen) { updateContentInset() }

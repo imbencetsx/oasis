@@ -143,7 +143,8 @@ import CefKit
     }
 
     func restoreCursorIfReturning() {
-        guard token != nil, let tab = engine?.tab, tab.session?.selectedID == tab.id,
+        guard ScreenRecordingDetector.isRecordingActive(for: engine?.tab),
+              let tab = engine?.tab, tab.session?.selectedID == tab.id,
               tab.session?.showsNewTabSearch != true, !tab.showsReader,
               NSApp.isActive, let host = engine?.host, let window = host.window,
               window !== engine?.captureWindow, window.isKeyWindow, window.isVisible,
@@ -157,6 +158,11 @@ import CefKit
     }
 
     private func updateCursor(_ host: ChromiumPageHost) {
+        guard ScreenRecordingDetector.isRecordingActive(for: engine?.tab) else {
+            wasAway = false
+            lastInsideScreenPoint = nil
+            return
+        }
         guard let tab = engine?.tab, tab.session?.selectedID == tab.id,
               tab.session?.showsNewTabSearch != true, !tab.showsReader,
               NSApp.isActive, let window = host.window, window !== engine?.captureWindow,

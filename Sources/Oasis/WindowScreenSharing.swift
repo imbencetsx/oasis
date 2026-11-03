@@ -174,6 +174,7 @@ import WebKit
     private var enabled = false
     private var generation = UUID()
     private var token: String?
+    var isSharing: Bool { token != nil }
     private var source: WebViewCaptureSource?
     private var statusItem: NSStatusItem?
     private var busy = false
