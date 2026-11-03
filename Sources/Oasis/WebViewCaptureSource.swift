@@ -59,21 +59,49 @@ import WebKit
         self.backgroundWindow = nil
     }
 
-    func close() { prepareForDisplay() }
+    private static var lastScreenPoints: [ObjectIdentifier: CGPoint] = [:]
+    private static var wasAway: [ObjectIdentifier: Bool] = [:]
+
+    func close() {
+        Self.lastScreenPoints.removeValue(forKey: ObjectIdentifier(webView))
+        Self.wasAway.removeValue(forKey: ObjectIdentifier(webView))
+        prepareForDisplay()
+    }
 
     private static func cursorSnapshot(webView: WKWebView, rect: CGRect) -> WebViewCaptureCursor? {
+        let id = ObjectIdentifier(webView)
         // Never sample another tab, desktop, or application's pointer. Keeping the
         // previous overlay also preserves its shape when the source loses focus.
         guard NSApp.isActive, let window = webView.window,
               window.isKeyWindow,
               window.isVisible, !window.isMiniaturized, window.isOnActiveSpace,
-              !webView.isHiddenOrHasHiddenAncestor else { return nil }
-        let point = webView.convert(window.convertPoint(fromScreen: NSEvent.mouseLocation), from: nil)
+              !webView.isHiddenOrHasHiddenAncestor else {
+            wasAway[id] = true
+            return nil
+        }
+        let mouseLocation = NSEvent.mouseLocation
+        let point = webView.convert(window.convertPoint(fromScreen: mouseLocation), from: nil)
         guard rect.contains(point), webView.visibleRect.contains(point),
-              let root = window.contentView else { return nil }
+              let root = window.contentView else {
+            wasAway[id] = true
+            return nil
+        }
         let rootPoint = root.superview?.convert(point, from: webView)
             ?? webView.convert(point, to: nil)
-        guard let hit = root.hitTest(rootPoint), hit === webView || hit.isDescendant(of: webView) else { return nil }
+        guard let hit = root.hitTest(rootPoint), hit === webView || hit.isDescendant(of: webView) else {
+            wasAway[id] = true
+            return nil
+        }
+        if wasAway[id] == true, let lastPoint = lastScreenPoints[id] {
+            wasAway[id] = false
+            if let primary = NSScreen.screens.first {
+                let quartzPoint = CGPoint(x: lastPoint.x, y: primary.frame.maxY - lastPoint.y)
+                CGWarpMouseCursorPosition(quartzPoint)
+            }
+            return nil
+        }
+        wasAway[id] = false
+        lastScreenPoints[id] = mouseLocation
         let pointer = NSCursor.current
         guard let image = pointer.image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
         return WebViewCaptureCursor(image: image,

@@ -18,6 +18,9 @@ import CefKit
     private var generation = UUID()
     private var statusItem: NSStatusItem?
     private var activity: NSObjectProtocol?
+    private var lastInsideScreenPoint: CGPoint?
+    private var wasAway = false
+    var isSharing: Bool { token != nil }
 
     init(engine: ChromiumTabEngine) { self.engine = engine }
 
@@ -27,6 +30,7 @@ import CefKit
         token = nil; framing = nil; cursor = nil
         latestFrame = nil; frameSequence = 0; deliveredSequence = -1
         cursorImage = nil; cursorURL = nil
+        lastInsideScreenPoint = nil; wasAway = false
         if let statusItem { NSStatusBar.system.removeStatusItem(statusItem) }
         statusItem = nil
         if let activity { ProcessInfo.processInfo.endActivity(activity) }
@@ -138,17 +142,51 @@ import CefKit
         browser.sendDevToolsMessage("Page.screencastFrameAck", params: ["sessionId": sessionID])
     }
 
+    func restoreCursorIfReturning() {
+        guard token != nil, let tab = engine?.tab, tab.session?.selectedID == tab.id,
+              tab.session?.showsNewTabSearch != true, !tab.showsReader,
+              NSApp.isActive, let host = engine?.host, let window = host.window,
+              window !== engine?.captureWindow, window.isKeyWindow, window.isVisible,
+              window.attachedSheet == nil, window.isOnActiveSpace, !window.isMiniaturized,
+              !host.isHiddenOrHasHiddenAncestor, wasAway, let lastPoint = lastInsideScreenPoint else { return }
+        wasAway = false
+        if let primary = NSScreen.screens.first {
+            let quartzPoint = CGPoint(x: lastPoint.x, y: primary.frame.maxY - lastPoint.y)
+            CGWarpMouseCursorPosition(quartzPoint)
+        }
+    }
+
     private func updateCursor(_ host: ChromiumPageHost) {
         guard let tab = engine?.tab, tab.session?.selectedID == tab.id,
               tab.session?.showsNewTabSearch != true, !tab.showsReader,
               NSApp.isActive, let window = host.window, window !== engine?.captureWindow,
               window.isKeyWindow, window.isVisible, window.attachedSheet == nil,
-              window.isOnActiveSpace, !window.isMiniaturized, !host.isHiddenOrHasHiddenAncestor else { return }
-        let point = host.convert(window.convertPoint(fromScreen: NSEvent.mouseLocation), from: nil)
+              window.isOnActiveSpace, !window.isMiniaturized, !host.isHiddenOrHasHiddenAncestor else {
+            wasAway = true
+            return
+        }
+        let mouseLocation = NSEvent.mouseLocation
+        let point = host.convert(window.convertPoint(fromScreen: mouseLocation), from: nil)
         guard host.pageBounds.contains(point), host.visibleRect.contains(point),
-              let root = window.contentView else { return }
+              let root = window.contentView else {
+            wasAway = true
+            return
+        }
         let rootPoint = root.superview?.convert(point, from: host) ?? host.convert(point, to: nil)
-        guard let hit = root.hitTest(rootPoint), hit === host || hit.isDescendant(of: host) else { return }
+        guard let hit = root.hitTest(rootPoint), hit === host || hit.isDescendant(of: host) else {
+            wasAway = true
+            return
+        }
+        if wasAway, let lastPoint = lastInsideScreenPoint {
+            wasAway = false
+            if let primary = NSScreen.screens.first {
+                let quartzPoint = CGPoint(x: lastPoint.x, y: primary.frame.maxY - lastPoint.y)
+                CGWarpMouseCursorPosition(quartzPoint)
+            }
+            return
+        }
+        wasAway = false
+        lastInsideScreenPoint = mouseLocation
         let current = NSCursor.current
         if cursorImage !== current.image,
            let tiff = current.image.tiffRepresentation,

@@ -186,7 +186,16 @@ struct BrowserViewport: View {
       }
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)
-    .onChange(of: session.selectedID, initial: true) { updateContentInset() }
+    .onChange(of: session.selectedID, initial: true) {
+      updateContentInset()
+      session.selectedTab?.chromium?.sharing.restoreCursorIfReturning()
+    }
+    .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { _ in
+      session.selectedTab?.chromium?.sharing.restoreCursorIfReturning()
+    }
+    .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+      session.selectedTab?.chromium?.sharing.restoreCursorIfReturning()
+    }
     .onChange(of: session.showsFind) { updateContentInset() }
     .onChange(of: session.isWindowFullscreen) { updateContentInset() }
   }
