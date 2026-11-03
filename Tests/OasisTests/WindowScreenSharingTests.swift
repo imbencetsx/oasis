@@ -91,7 +91,7 @@ import WebKit
               if (mode === 'retry') return {retry: true};
               if (mode === 'error') throw new Error('WindowServer is switching desktops');
               if (mode === 'ended') return {ended: true};
-              return image;
+              return {image, cursor: {image, x: 2, y: 3, width: 4, height: 4}};
             }};
             const w = {
               navigator: {mediaDevices: {}, userActivation: {isActive: true}},

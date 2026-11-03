@@ -35,7 +35,8 @@ struct BrowserWindowHost: View {
       .background(WindowLifecycleView(
         showsSidebar: session.showsTabSidebar && !session.isWindowFullscreen,
         reduceMotion: reduceMotion,
-        onFullscreenChange: { if session.isWindowFullscreen != $0 { session.isWindowFullscreen = $0 } }
+        onFullscreenChange: { if session.isWindowFullscreen != $0 { session.isWindowFullscreen = $0 } },
+        onWindowChange: { session.window = $0 }
       ) { session.shutdown() })
       .task {
         guard !hasAppeared else { return }
@@ -227,9 +228,15 @@ struct BrowserChrome: View {
               .disabled(!(session.selectedTab?.canGoBack ?? false)).help("Back (⌘[)")
               .contextMenu {
                 if let tab = session.selectedTab {
+                  if let chromium = tab.chromium {
+                    ForEach(chromium.backHistory) { item in
+                      Button(item.title) { chromium.go(to: item) }
+                    }
+                  } else {
                   ForEach(Array(tab.webView.backForwardList.backList.reversed()), id: \.url) {
                     item in
                     Button(item.title ?? item.url.displayHost) { tab.webView.go(to: item) }
+                  }
                   }
                 }
               }
@@ -524,22 +531,26 @@ struct WindowLifecycleView: NSViewRepresentable {
   var showsSidebar: Bool
   var reduceMotion: Bool
   var onFullscreenChange: (Bool) -> Void
+  var onWindowChange: (NSWindow?) -> Void = { _ in }
   var onClose: () -> Void
   func makeNSView(context: Context) -> CloseObserverView {
     let view = CloseObserverView(onClose: onClose)
     view.onFullscreenChange = onFullscreenChange
+    view.onWindowChange = onWindowChange
     view.configureTrafficLights(showsSidebar: showsSidebar, reduceMotion: reduceMotion)
     return view
   }
   func updateNSView(_ nsView: CloseObserverView, context: Context) {
     nsView.onClose = onClose
     nsView.onFullscreenChange = onFullscreenChange
+    nsView.onWindowChange = onWindowChange
     nsView.configureTrafficLights(showsSidebar: showsSidebar, reduceMotion: reduceMotion)
   }
 }
 final class CloseObserverView: NSView {
   var onClose: () -> Void
   var onFullscreenChange: (Bool) -> Void = { _ in }
+  var onWindowChange: (NSWindow?) -> Void = { _ in }
   private var observers: [NSObjectProtocol] = []
   private var trafficLights: WindowTrafficLights?
   private var showsSidebar = true
@@ -558,6 +569,7 @@ final class CloseObserverView: NSView {
     trafficLights = nil
     for observer in observers { NotificationCenter.default.removeObserver(observer) }
     observers = []
+    onWindowChange(window)
     guard let window else { return }
     window.isMovableByWindowBackground = false
     window.isOpaque = false

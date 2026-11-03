@@ -95,23 +95,48 @@ import WebKit
             };
             cleanups.add(finish);
             sharingStops.set(info.token, finish);
+            let cursorImage = null, cursorURL = '';
+            let cachedImage = null;
             const paint = async () => {
               const frame = await bridge.postMessage({action: 'frame', token: info.token});
               if (stopped) return false;
               if (frame?.ended) { finish(); return false; }
-              // WebKit can temporarily have no frame during a Space or
-              // occlusion transition. Keep the canvas's last image and retry.
-              if (frame?.retry) return false;
-              const image = new w.Image();
-              image.src = frame;
-              await image.decode();
-              if (!stopped) context.drawImage(image, 0, 0, canvas.width, canvas.height);
+              // WebKit or Chromium can temporarily have no new frame.
+              // Keep the canvas's last image and retry smoothly.
+              if (frame?.retry) {
+                if (cachedImage && !stopped) {
+                  context.drawImage(cachedImage, 0, 0, canvas.width, canvas.height);
+                  return true;
+                }
+                return false;
+              }
+              if (frame?.same) {
+                if (cachedImage && !stopped) {
+                  context.drawImage(cachedImage, 0, 0, canvas.width, canvas.height);
+                }
+              } else {
+                const image = new w.Image();
+                image.src = typeof frame === 'string' ? frame : frame.image;
+                await image.decode();
+                if (stopped) return false;
+                cachedImage = image;
+                context.drawImage(image, 0, 0, canvas.width, canvas.height);
+              }
+              // Overlay cursor
+              if (frame?.cursor) {
+                const cursor = frame.cursor;
+                if (cursor.image !== cursorURL) {
+                  cursorImage = new w.Image(); cursorImage.src = cursor.image;
+                  await cursorImage.decode(); cursorURL = cursor.image;
+                }
+                if (!stopped && cursorImage) context.drawImage(cursorImage, cursor.x, cursor.y, cursor.width, cursor.height);
+              }
               return !stopped;
             };
             try {
               if (!await paint()) throw new w.DOMException('The initial tab frame is unavailable.', 'AbortError');
               if (stopped) throw new w.DOMException('Tab sharing has ended.', 'AbortError');
-              stream = canvas.captureStream(10);
+              stream = canvas.captureStream(60);
               track = stream.getVideoTracks()[0];
               const sharing = {
                 tracks, finish,
@@ -120,13 +145,19 @@ import WebKit
                 add(value) { tracks.add(value); sharedTracks.set(value, sharing); }
               };
               sharing.add(track);
+              const targetInterval = 1000 / 60;
               const next = async () => {
-                let updated = false;
-                try { updated = await paint(); }
+                const start = w.performance?.now ? w.performance.now() : Date.now();
+                try { await paint(); }
                 catch (_) { /* A transient bridge/capture/decode error must not end the stream. */ }
-                if (!stopped) timer = w.setTimeout(next, updated ? 100 : 500);
+                if (!stopped) {
+                  const now = w.performance?.now ? w.performance.now() : Date.now();
+                  const elapsed = now - start;
+                  const delay = Math.max(0, targetInterval - elapsed);
+                  timer = w.setTimeout(next, delay);
+                }
               };
-              timer = w.setTimeout(next, 100);
+              timer = w.setTimeout(next, 0);
               return stream;
             } catch (error) { finish(); throw error; }
           }});
@@ -229,9 +260,10 @@ import WebKit
         if action == "frame", token == nil || body["token"] != token { return ["ended": true] }
         guard let token, body["token"] == token else { throw ShareError.message("Tab sharing has ended.") }
         if action == "end" { stop(); return true }
-        guard action == "frame", !busy, let source else {
+        guard action == "frame", let source else {
             throw ShareError.message("A tab frame is not available.")
         }
+        if busy { return ["retry": true] }
         busy = true
         defer { busy = false }
         let image: CGImage
@@ -242,14 +274,17 @@ import WebKit
             return ["retry": true]
         }
         guard self.token == token, enabled else { throw ShareError.message("Tab sharing has ended.") }
-        let data = await Task.detached(priority: .userInitiated) {
-            NSBitmapImageRep(cgImage: image).representation(using: .jpeg, properties: [.compressionFactor: 0.7])
+        let encoded = await Task.detached(priority: .high) {
+            guard let data = NSBitmapImageRep(cgImage: image).representation(using: .jpeg, properties: [.compressionFactor: 0.75]) else {
+                return nil as String?
+            }
+            return "data:image/jpeg;base64," + data.base64EncodedString()
         }.value
         guard self.token == token, enabled else { throw ShareError.message("Tab sharing has ended.") }
-        guard let data else {
+        guard let encoded else {
             throw ShareError.message("The tab frame could not be encoded.")
         }
-        return "data:image/jpeg;base64," + data.base64EncodedString()
+        return encoded
     }
 
     private enum ShareError: LocalizedError {

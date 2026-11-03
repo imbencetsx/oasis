@@ -1,6 +1,7 @@
 import SwiftUI
 import CoreText
 import AppKit
+import CefSwiftUI
 
 @MainActor enum AppLifecycle { static var isTerminating = false }
 
@@ -17,7 +18,21 @@ import AppKit
     }
 }
 
-@main struct OasisApp: App {
+@main struct OasisApp: CefSwiftApp {
+    static var cefConfiguration: CefConfiguration {
+        var config = CefConfiguration()
+        config.noSandbox = false
+        config.safeStorage = .keychain
+        let root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("com.oasis.browser/Chromium", isDirectory: true)
+        config.rootCachePath = root
+        config.cachePath = root.appendingPathComponent("Default", isDirectory: true)
+        config.persistSessionCookies = true
+        config.browserSubprocessPath = Bundle.main.privateFrameworksURL?
+            .appendingPathComponent("[oasis] Helper.app/Contents/MacOS/[oasis] Helper")
+        return config
+    }
+
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     init() {
         if let font = Bundle.main.url(forResource: "GeistMono-Regular", withExtension: "ttf", subdirectory: "Fonts") {
@@ -45,9 +60,17 @@ import AppKit
 }
 
 struct BrowserCommands: Commands {
-    @FocusedValue(\.browserSession) private var session
+    @FocusedValue(\.browserSession) private var focusedSession
+    private var session: BrowserSession? { focusedSession ?? BrowserLibrary.shared.activeSession }
     @Environment(\.openWindow) private var openWindow
     var body: some Commands {
+        #if DEBUG
+        CommandMenu("Developer") {
+            Button("Run Chromium Checks") {
+                if let session { Task { await ChromiumIntegrationChecks.run(session: session) } }
+            }.disabled(session?.selectedTab?.chromium == nil)
+        }
+        #endif
         CommandGroup(replacing: .newItem) {
             Button("New Tab") { session?.showsNewTabSearch.toggle() }.keyboardShortcut("t").disabled(session == nil)
             Button("New Window") { openWindow(value: BrowserWindowRequest()) }.keyboardShortcut("n")

@@ -1,5 +1,6 @@
 import SwiftUI
 import WebKit
+import CefKit
 import UniformTypeIdentifiers
 
 @MainActor @Observable
@@ -12,7 +13,9 @@ final class BrowserTab: NSObject, Identifiable, WKNavigationDelegate, WKUIDelega
     @ObservationIgnored private var syncTask: Task<Void, Never>?
     @ObservationIgnored private var isClosed = false
     @ObservationIgnored private var isHistoryNavigation = false
-    var hasWebView: Bool { contentView != nil }
+    @ObservationIgnored var chromium: ChromiumTabEngine?
+    var hasWebView: Bool { chromium.map { $0.browser != nil } ?? (contentView != nil) }
+    var renderView: NSView { chromium?.host ?? webView }
     var webView: WKWebView {
         if let contentView { return contentView }
         return makeWebView()
@@ -55,7 +58,7 @@ final class BrowserTab: NSObject, Identifiable, WKNavigationDelegate, WKUIDelega
     @ObservationIgnored private let spoofFrames: SpoofFrameCoverage
     @ObservationIgnored private let windowSharing = WindowScreenSharing()
 
-    init(isPrivate: Bool, configuration: WKWebViewConfiguration? = nil, dataStore: WKWebsiteDataStore? = nil, spoofModeEnabled: Bool = false) {
+    init(isPrivate: Bool, configuration: WKWebViewConfiguration? = nil, dataStore: WKWebsiteDataStore? = nil, spoofModeEnabled: Bool = false, chromiumProfile: CefProfile? = nil) {
         self.isPrivate = isPrivate
         self.spoofModeEnabled = spoofModeEnabled
         let coverage = SpoofFrameCoverage()
@@ -66,6 +69,9 @@ final class BrowserTab: NSObject, Identifiable, WKNavigationDelegate, WKUIDelega
         config.preferences.isElementFullscreenEnabled = true
         self.configuration = config
         super.init()
+        if CefRuntime.shared.isInitialized {
+            chromium = ChromiumTabEngine(tab: self, profile: chromiumProfile ?? (isPrivate ? .incognito() : .default), spoofEnabled: spoofModeEnabled)
+        }
     }
 
     private func makeWebView() -> WKWebView {
@@ -98,6 +104,7 @@ final class BrowserTab: NSObject, Identifiable, WKNavigationDelegate, WKUIDelega
     }
 
     fileprivate func updateWebsiteAppearance() {
+        guard chromium == nil else { return }
         let host = (url?.host ?? "").lowercased()
         let isGoogle = host == "google.com" || host.hasSuffix(".google.com")
             || host.hasPrefix("google.") || host.hasPrefix("www.google.")
@@ -145,6 +152,7 @@ final class BrowserTab: NSObject, Identifiable, WKNavigationDelegate, WKUIDelega
         isBlankPage = url.absoluteString == "about:blank"
         title = isBlankPage ? "Empty Tab" : url.displayHost
         deferredURL = url
+        chromium?.requestedURL = url
     }
 
     func loadIfNeeded() {
@@ -161,12 +169,14 @@ final class BrowserTab: NSObject, Identifiable, WKNavigationDelegate, WKUIDelega
         if session?.selectedID == id { session?.showsNewTabSearch = false }
         title = isBlankPage ? "Empty Tab" : url.displayHost
         favicon = nil; faviconTask?.cancel()
+        if let chromium { chromium.load(url); session?.save(); return }
         if url.isFileURL { webView.loadFileURL(url, allowingReadAccessTo: url.deletingLastPathComponent()) }
         else { webView.load(URLRequest(url: url)) }
         session?.save()
     }
     func setSpoofMode(_ enabled: Bool) {
         spoofModeEnabled = enabled
+        if let chromium { chromium.setSpoof(enabled); return }
         windowSharing.apply(enabled: enabled)
         guard let webView = contentView else { return }
         webView.customUserAgent = enabled ? SpoofMode.userAgent : nil
@@ -180,21 +190,26 @@ final class BrowserTab: NSObject, Identifiable, WKNavigationDelegate, WKUIDelega
         webView.evaluateJavaScript(spoofModeEnabled ? SpoofMode.source : SpoofMode.restoreSource) { _, _ in }
     }
     func setTopInset(_ topInset: CGFloat) {
+        if let chromium { chromium.host.topInset = topInset; return }
         let insets = NSEdgeInsets(top: topInset, left: 0, bottom: 0, right: 0)
         if webView.obscuredContentInsets.top != topInset { webView.obscuredContentInsets = insets }
     }
-    func prepareForDisplay() { windowSharing.prepareForDisplay() }
-    func goBack() { showsReader = false; errorMessage = nil; isHistoryNavigation = true; webView.goBack() }
-    func goForward() { showsReader = false; errorMessage = nil; isHistoryNavigation = true; webView.goForward() }
+    func prepareForDisplay() { chromium?.prepareForDisplay(); windowSharing.prepareForDisplay() }
+    func goBack() { showsReader = false; errorMessage = nil; isHistoryNavigation = true; if let chromium { chromium.browser?.goBack() } else { webView.goBack() } }
+    func goForward() { showsReader = false; errorMessage = nil; isHistoryNavigation = true; if let chromium { chromium.browser?.goForward() } else { webView.goForward() } }
     func reload() {
         errorMessage = nil
-        if deferredURL != nil { loadIfNeeded() } else { webView.reload() }
+        if deferredURL != nil { loadIfNeeded() } else if let chromium { chromium.browser?.reload() } else { webView.reload() }
     }
-    func stop() { webView.stopLoading() }
-    func setZoom(_ value: Double) { zoom = min(3, max(0.5, value)); webView.pageZoom = zoom }
+    func stop() { if let chromium { chromium.browser?.stopLoading() } else { webView.stopLoading() } }
+    func setZoom(_ value: Double) {
+        zoom = min(3, max(0.5, value))
+        if let chromium { chromium.browser?.zoomLevel = log(zoom) / log(1.2) } else { webView.pageZoom = zoom }
+    }
     func close() {
         guard !isClosed else { return }
         isClosed = true
+        chromium?.close()
         deferredURL = nil
         syncTask?.cancel(); syncTask = nil
         windowSharing.close()
@@ -207,21 +222,25 @@ final class BrowserTab: NSObject, Identifiable, WKNavigationDelegate, WKUIDelega
     }
     func find(backwards: Bool = false) {
         guard !findText.isEmpty else { findResult = ""; return }
+        if let chromium { chromium.browser?.find(findText, forward: !backwards, matchCase: false); return }
         let config = WKFindConfiguration()
         config.backwards = backwards; config.wraps = true; config.caseSensitive = false
         webView.find(findText, configuration: config) { [weak self] result in self?.findResult = result.matchFound ? "" : "No matches" }
     }
     func printPage() {
+        if let chromium { chromium.execute("window.print()"); return }
         let operation = webView.printOperation(with: NSPrintInfo.shared)
         operation.showsPrintPanel = true
         operation.run()
     }
     func savePDF() {
+        if let chromium { exportChromium(chromium, pdf: true); return }
         webView.createPDF(configuration: WKPDFConfiguration()) { [weak self] result in
             self?.saveExport(result, extension: "pdf", type: .pdf)
         }
     }
     func saveArchive() {
+        if let chromium { exportChromium(chromium, pdf: false); return }
         webView.createWebArchiveData { [weak self] result in
             self?.saveExport(result, extension: "webarchive", type: UTType(filenameExtension: "webarchive") ?? .data)
         }
@@ -244,7 +263,7 @@ final class BrowserTab: NSObject, Identifiable, WKNavigationDelegate, WKUIDelega
     func toggleReader() {
         if showsReader { showsReader = false; return }
         // Read text only. The extracted article never executes scripts or loads remote resources.
-        webView.evaluateJavaScript("""
+        evaluatePage("""
         (() => {
           const root = document.querySelector('article') || document.querySelector('main') || document.body;
           const paragraphs = [...root.querySelectorAll('h1,h2,h3,p,blockquote')]
@@ -258,6 +277,25 @@ final class BrowserTab: NSObject, Identifiable, WKNavigationDelegate, WKUIDelega
             }
             self.readerContent = ReaderContent(title: article["title"] ?? self.title, text: text)
             self.showsReader = true
+        }
+    }
+
+    private func evaluatePage(_ script: String, completion: @escaping (Any?, Error?) -> Void) {
+        if let chromium {
+            Task { do { completion(try await chromium.evaluate(script), nil) } catch { completion(nil, error) } }
+        } else { webView.evaluateJavaScript(script, completionHandler: completion) }
+    }
+
+    private func exportChromium(_ engine: ChromiumTabEngine, pdf: Bool) {
+        Task {
+            do {
+                guard let browser = engine.browser else { return }
+                let result = try await browser.devTools(pdf ? "Page.printToPDF" : "Page.captureSnapshot",
+                    params: pdf ? ["printBackground": true] : ["format": "mhtml"])
+                let value = result["data"] as? String ?? ""
+                let data = pdf ? Data(base64Encoded: value) ?? Data() : Data(value.utf8)
+                saveExport(.success(data), extension: pdf ? "pdf" : "mhtml", type: pdf ? .pdf : .data)
+            } catch { session?.notice = error.localizedDescription }
         }
     }
 
@@ -419,16 +457,16 @@ struct ReaderContent { var title: String; var text: String }
 struct WebContentView: NSViewRepresentable {
     let tab: BrowserTab
     var cornerRadius: CGFloat = BrowserPageFrame.cornerRadius
-    func makeNSView(context: Context) -> WKWebView {
+    func makeNSView(context: Context) -> NSView {
         tab.prepareForDisplay()
-        roundCorners(tab.webView)
-        return tab.webView
+        roundCorners(tab.renderView)
+        return tab.renderView
     }
-    func updateNSView(_ nsView: WKWebView, context: Context) {
+    func updateNSView(_ nsView: NSView, context: Context) {
         tab.updateWebsiteAppearance()
         roundCorners(nsView)
     }
-    private func roundCorners(_ webView: WKWebView) {
+    private func roundCorners(_ webView: NSView) {
         webView.wantsLayer = true
         webView.layer?.cornerRadius = cornerRadius
         webView.layer?.cornerCurve = .continuous

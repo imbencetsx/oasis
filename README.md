@@ -2,7 +2,7 @@
 
 > A calmer place for the web.
 
-**[oasis] is a native macOS browser built with SwiftUI and WebKit.** Organize tabs into spaces, browse with a translucent sidebar, and keep your history and bookmarks on your Mac. Liquid Glass controls, page-colored backgrounds, and adjustable grain give the window a quiet, cohesive feel.
+**[oasis] is a native macOS browser built with SwiftUI and Chromium (CEF).** Organize tabs into spaces, browse with a translucent sidebar, and keep your history and bookmarks on your Mac. Liquid Glass controls, page-colored backgrounds, and adjustable grain give the window a quiet, cohesive feel.
 
 ## Requirements
 
@@ -10,7 +10,7 @@
 - **Xcode 26 or later**, with Swift 6.2 or later, to build it.
 - **Python 3** for DMG packaging.
 
-The Swift package has no external package dependencies. Run the commands below from the repository root.
+The SwiftUI shell uses a pinned, vendored CefSwift bridge in `Vendor/CefSwift`. The build script downloads the matching CEF runtime into `.cef/`, verifies its checksum, and bundles Chromium and its sandboxed helpers. Run the commands below from the repository root.
 
 ## Get started
 
@@ -57,7 +57,7 @@ To create an installer:
 
 With **Spoof Mode** enabled, an HTTPS page can request sharing of its own tab.
 Approve **Share Tab** to start. Only that tab's webview is captured: no address
-bar, sidebar, other tabs, desktop, cursor, or audio. The feed stays tied to the
+bar, sidebar, other tabs, desktop, or audio. The recorded cursor stays at its last page position when you leave the page. The feed stays tied to the
 originating tab when you open or switch to another tab, and it keeps updating
 in the background. Native Screen Recording permission is not required.
 
@@ -75,7 +75,7 @@ History, bookmarks, reading-list entries, spaces, and normal-window snapshots ar
 ~/Library/Application Support/Oasis/Library.json
 ```
 
-Normal website cookies and caches use WebKit’s persistent store. Each private window gets its own nonpersistent store, shared by that window’s tabs. Private history, spaces, and tab snapshots are not saved; bookmarks and downloaded files you explicitly save remain on your Mac.
+Normal website cookies and caches use Chromium’s persistent profile at `~/Library/Application Support/com.oasis.browser/Chromium`. Each private window gets its own in-memory CEF profile, shared by that window’s tabs. Existing WebKit website storage remains separate; bookmarks, history, and spaces retain their existing library. Private history, spaces, and tab snapshots are not saved; bookmarks and downloaded files you explicitly save remain on your Mac.
 
 ## Development and checks
 
@@ -86,4 +86,4 @@ swift test
 swift test -c release
 ```
 
-Tests cover navigation and suggestions, library persistence, private storage, spaces, lazy restoration, iframe spoofing, clipboard typing, favicon sizing, and native window controls.
+Tests cover navigation and suggestions, library persistence, private storage, spaces, lazy restoration, iframe spoofing, clipboard typing, favicon sizing, and native window controls. WebKit is retained as a compatibility test backend when the CEF runtime is not bootstrapped. In a bundled debug app, Developer → Run Chromium Checks exercises the actual Chromium runtime, fullscreen signals, iframe scripts, API restoration, page capture, and live repainting while the source tab is in the background. Archives are exported in Chromium’s MHTML format.

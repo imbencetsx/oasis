@@ -29,6 +29,7 @@ struct WebViewCaptureFraming: Sendable {
                                       bitsPerComponent: 8, bytesPerRow: 0,
                                       space: CGColorSpaceCreateDeviceRGB(),
                                       bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        context.interpolationQuality = .low
         context.setFillColor(CGColor(gray: 0.06, alpha: 1))
         context.fill(CGRect(x: 0, y: 0, width: width, height: height))
         // Continue the window's own top-edge background into unused space and

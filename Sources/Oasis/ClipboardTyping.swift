@@ -27,6 +27,7 @@ final class ClipboardTyping {
     @ObservationIgnored private var task: Task<Void, Never>?
     @ObservationIgnored private var eventMonitor: Any?
     @ObservationIgnored private weak var typingWebView: WKWebView?
+    @ObservationIgnored private weak var typingChromium: ChromiumTabEngine?
     @ObservationIgnored private var focusToken: String?
 
     func toggle(spoofModeEnabled: Bool) {
@@ -48,6 +49,10 @@ final class ClipboardTyping {
             webView.evaluateJavaScript("if (globalThis.__oasisClipboardTyping?.token === '\(token)') delete globalThis.__oasisClipboardTyping;",
                 in: nil, in: .defaultClient) { _ in }
         }
+        if let engine = typingChromium, let token = focusToken {
+            Task { _ = try? await engine.evaluateIsolated("if (globalThis.__oasisClipboardTyping?.token === token) delete globalThis.__oasisClipboardTyping;", token: token) }
+        }
+        typingChromium = nil
         typingWebView = nil
         focusToken = nil
     }
@@ -58,12 +63,14 @@ final class ClipboardTyping {
         guard spoofModeEnabled, !text.isEmpty, let responder = window.firstResponder,
               responder is NSTextInputClient else { return }
         var view = responder as? NSView
-        while let current = view, !(current is WKWebView) { view = current.superview }
+        while let current = view, !(current is WKWebView), !(current is ChromiumPageHost) { view = current.superview }
         let webView = view as? WKWebView
+        let chromium = (view as? ChromiumPageHost)?.engine
         let token = UUID().uuidString
         let speed = ClipboardTypingSpeed.normalized(speedMultiplier ?? ClipboardTypingSpeed.savedMultiplier())
         isTyping = true
         typingWebView = webView
+        typingChromium = chromium
         focusToken = token
         // Any manual typing or click cancels the remaining text. Let Command-9
         // reach the menu action so the same shortcut can stop an active run.
@@ -73,7 +80,7 @@ final class ClipboardTyping {
             if !isShortcut { self?.stop() }
             return event
         }
-        task = Task { [weak self, weak window, weak responder, weak webView] in
+        task = Task { [weak self, weak window, weak responder, weak webView, weak chromium] in
             defer {
                 // A cancelled run must not stop a newer run.
                 if !Task.isCancelled { self?.stop() }
@@ -83,6 +90,9 @@ final class ClipboardTyping {
                 guard (try? await webView.callAsyncJavaScript(Self.captureFocus,
                     arguments: ["token": token], in: nil, contentWorld: .defaultClient)) as? Bool == true else { return }
             }
+            if let chromium {
+                guard (try? await chromium.evaluateIsolated(Self.captureFocus, token: token)) as? Bool == true else { return }
+            }
             // Iterate grapheme clusters so emoji and combining marks stay intact.
             for character in text {
                 guard !Task.isCancelled, let window, window.isKeyWindow,
@@ -91,6 +101,9 @@ final class ClipboardTyping {
                 if let webView {
                     guard (try? await webView.callAsyncJavaScript(Self.checkFocus,
                         arguments: ["token": token], in: nil, contentWorld: .defaultClient)) as? Bool == true else { return }
+                }
+                if let chromium {
+                    guard (try? await chromium.evaluateIsolated(Self.checkFocus, token: token)) as? Bool == true else { return }
                 }
                 guard !Task.isCancelled, window.isKeyWindow, window.firstResponder === responder else { return }
                 // Use the native text input path, never the paste action or DOM value setters.

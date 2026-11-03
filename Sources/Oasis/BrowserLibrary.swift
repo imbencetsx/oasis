@@ -1,5 +1,6 @@
 import SwiftUI
 import WebKit
+import CefKit
 import AppKit
 
 @MainActor @Observable
@@ -35,6 +36,10 @@ final class BrowserLibrary {
     @ObservationIgnored private var saveTask: Task<Void, Never>?
     @ObservationIgnored private var restorationClaimed = false
     @ObservationIgnored private var sessions: [UUID: BrowserSession] = [:]
+    var activeSession: BrowserSession? {
+        sessions.values.first { $0.window?.isKeyWindow == true }
+            ?? sessions.values.first { $0.window?.isMainWindow == true }
+    }
 
     init(storageURL: URL? = nil) {
         spoofModeEnabled = UserDefaults.standard.bool(forKey: "spoofMode")
@@ -183,8 +188,36 @@ final class BrowserLibrary {
     }
     func clearWebsiteData() async {
         isClearingWebsiteData = true
+        defer { isClearingWebsiteData = false }
+        if CefRuntime.shared.isInitialized {
+            let utilityWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 320, height: 240),
+                styleMask: [.borderless], backing: .buffered, defer: false)
+            utilityWindow.isReleasedWhenClosed = false
+            let view = NSView(frame: utilityWindow.contentLayoutRect)
+            utilityWindow.contentView = view
+            let browser = CefBrowser.createBrowser(parentView: view, bounds: view.bounds,
+                url: URL(string: "about:blank")!, delegate: nil)
+            defer { browser.close(force: true); utilityWindow.close() }
+            do {
+                let cookies = try await browser.devTools("Storage.getCookies")
+                var origins = Set((historyEntries.map(\.url) + sessions.values.flatMap { $0.tabs.compactMap(\.url) })
+                    .compactMap { url -> String? in
+                        guard url.isWebURL, let host = url.host else { return nil }
+                        return "\(url.scheme!)://\(host)" + (url.port.map { ":\($0)" } ?? "")
+                    })
+                for cookie in cookies["cookies"] as? [[String: Any]] ?? [] {
+                    guard let domain = cookie["domain"] as? String else { continue }
+                    let host = domain.trimmingCharacters(in: CharacterSet(charactersIn: "."))
+                    origins.insert("https://\(host)"); origins.insert("http://\(host)")
+                }
+                for origin in origins {
+                    _ = try await browser.devTools("Storage.clearDataForOrigin", params: ["origin": origin, "storageTypes": "all"])
+                }
+                _ = try await browser.devTools("Network.clearBrowserCookies")
+                _ = try await browser.devTools("Network.clearBrowserCache")
+            } catch { sessions.values.first?.notice = "Website data could not be completely cleared: \(error.localizedDescription)" }
+        }
         await WKWebsiteDataStore.default().removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), modifiedSince: .distantPast)
-        isClearingWebsiteData = false
     }
 
     func register(_ session: BrowserSession) {
