@@ -10,7 +10,7 @@ extension Color {
   static let oasisAccent = Color(
     nsColor: NSColor(name: nil) { appearance in
       if appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua {
-        return NSColor(red: 1, green: 0.38, blue: 0.42, alpha: 1)
+        return .white
       }
       return NSColor(red: 0.76, green: 0.12, blue: 0.20, alpha: 1)
     })
@@ -35,7 +35,8 @@ struct BrowserWindowHost: View {
       .background(WindowLifecycleView(
         showsSidebar: session.showsTabSidebar && !session.isWindowFullscreen,
         reduceMotion: reduceMotion,
-        onFullscreenChange: { if session.isWindowFullscreen != $0 { session.isWindowFullscreen = $0 } }
+        onFullscreenChange: { if session.isWindowFullscreen != $0 { session.isWindowFullscreen = $0 } },
+        onWindowChange: { session.window = $0 }
       ) { session.shutdown() })
       .task {
         guard !hasAppeared else { return }
@@ -142,7 +143,25 @@ struct BrowserWindow: View {
     .onChange(of: session.library.storageError) { _, error in
       if let error { session.notice = error }
     }
-    .onAppear { if let error = session.library.storageError { session.notice = error } }
+    .onAppear {
+      if let error = session.library.storageError { session.notice = error }
+      installCursorTrackingMonitor(for: session)
+    }
+  }
+}
+
+@MainActor
+private var cursorMonitorInstalled = false
+
+@MainActor
+private func installCursorTrackingMonitor(for session: BrowserSession) {
+  guard !cursorMonitorInstalled else { return }
+  cursorMonitorInstalled = true
+  NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged]) { event in
+    if let tab = session.selectedTab, ScreenRecordingDetector.isRecordingActive(for: tab) {
+      tab.updateCursorTracking()
+    }
+    return event
   }
 }
 
@@ -185,7 +204,16 @@ struct BrowserViewport: View {
       }
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)
-    .onChange(of: session.selectedID, initial: true) { updateContentInset() }
+    .onChange(of: session.selectedID, initial: true) {
+      updateContentInset()
+      session.selectedTab?.restoreCursorIfReturning()
+    }
+    .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { _ in
+      session.selectedTab?.restoreCursorIfReturning()
+    }
+    .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+      session.selectedTab?.restoreCursorIfReturning()
+    }
     .onChange(of: session.showsFind) { updateContentInset() }
     .onChange(of: session.isWindowFullscreen) { updateContentInset() }
   }
@@ -227,9 +255,15 @@ struct BrowserChrome: View {
               .disabled(!(session.selectedTab?.canGoBack ?? false)).help("Back (⌘[)")
               .contextMenu {
                 if let tab = session.selectedTab {
+                  if let chromium = tab.chromium {
+                    ForEach(chromium.backHistory) { item in
+                      Button(item.title) { chromium.go(to: item) }
+                    }
+                  } else {
                   ForEach(Array(tab.webView.backForwardList.backList.reversed()), id: \.url) {
                     item in
                     Button(item.title ?? item.url.displayHost) { tab.webView.go(to: item) }
+                  }
                   }
                 }
               }
@@ -524,22 +558,26 @@ struct WindowLifecycleView: NSViewRepresentable {
   var showsSidebar: Bool
   var reduceMotion: Bool
   var onFullscreenChange: (Bool) -> Void
+  var onWindowChange: (NSWindow?) -> Void = { _ in }
   var onClose: () -> Void
   func makeNSView(context: Context) -> CloseObserverView {
     let view = CloseObserverView(onClose: onClose)
     view.onFullscreenChange = onFullscreenChange
+    view.onWindowChange = onWindowChange
     view.configureTrafficLights(showsSidebar: showsSidebar, reduceMotion: reduceMotion)
     return view
   }
   func updateNSView(_ nsView: CloseObserverView, context: Context) {
     nsView.onClose = onClose
     nsView.onFullscreenChange = onFullscreenChange
+    nsView.onWindowChange = onWindowChange
     nsView.configureTrafficLights(showsSidebar: showsSidebar, reduceMotion: reduceMotion)
   }
 }
 final class CloseObserverView: NSView {
   var onClose: () -> Void
   var onFullscreenChange: (Bool) -> Void = { _ in }
+  var onWindowChange: (NSWindow?) -> Void = { _ in }
   private var observers: [NSObjectProtocol] = []
   private var trafficLights: WindowTrafficLights?
   private var showsSidebar = true
@@ -558,6 +596,7 @@ final class CloseObserverView: NSView {
     trafficLights = nil
     for observer in observers { NotificationCenter.default.removeObserver(observer) }
     observers = []
+    onWindowChange(window)
     guard let window else { return }
     window.isMovableByWindowBackground = false
     window.isOpaque = false

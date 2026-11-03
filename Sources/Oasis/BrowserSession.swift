@@ -1,5 +1,6 @@
 import SwiftUI
 import WebKit
+import CefKit
 
 @MainActor @Observable
 final class BrowserSession: Identifiable {
@@ -24,6 +25,8 @@ final class BrowserSession: Identifiable {
   private var selectedBySpace: [UUID: UUID] = [:]
   @ObservationIgnored private var activated = false
   @ObservationIgnored private var isRestoring = false
+  @ObservationIgnored private var chromiumProfile: CefProfile?
+  @ObservationIgnored weak var window: NSWindow?
   @ObservationIgnored private let privateStore: WKWebsiteDataStore?
 
   init(library: BrowserLibrary? = nil, isPrivate: Bool = false) {
@@ -32,6 +35,7 @@ final class BrowserSession: Identifiable {
     currentSpaceID = (isPrivate ? BrowserSpace.defaults : self.library.spaces)[0].id
     downloads = isPrivate ? BrowserDownloads() : .shared
     privateStore = isPrivate ? .nonPersistent() : nil
+    if CefRuntime.shared.isInitialized { chromiumProfile = isPrivate ? .incognito() : .default }
   }
   var spaces: [BrowserSpace] { isPrivate ? privateSpaces : library.spaces }
   var currentSpace: BrowserSpace { spaces.first { $0.id == currentSpaceID } ?? spaces[0] }
@@ -92,7 +96,7 @@ final class BrowserSession: Identifiable {
   {
     let tab = BrowserTab(
       isPrivate: isPrivate, configuration: configuration, dataStore: privateStore,
-      spoofModeEnabled: library.spoofModeEnabled)
+      spoofModeEnabled: library.spoofModeEnabled, chromiumProfile: chromiumProfile)
     let target = spaceID.flatMap { id in spaces.contains { $0.id == id } ? id : nil } ?? currentSpaceID
     tab.session = self
     tab.spaceID = target

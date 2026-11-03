@@ -8,6 +8,7 @@ struct NewTabSearch: View {
   @State private var hasEntered = false
   @State private var typingGlow = 0.0
   @FocusState private var isFocused: Bool
+  @Environment(\.colorScheme) private var colorScheme
   @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -18,7 +19,9 @@ struct NewTabSearch: View {
   }
   private var effectiveSuggestionID: String? { selection ?? suggestions.first?.id }
   private var glow: AngularGradient {
-    AngularGradient(colors: [.red, .orange, .pink, .purple, .red], center: .center)
+    AngularGradient(
+      colors: colorScheme == .dark ? [.white, .white] : [.red, .orange, .pink, .purple, .red],
+      center: .center)
   }
 
   var body: some View {
@@ -62,14 +65,33 @@ struct NewTabSearch: View {
               )
               .help("Open website or search").accessibilityLabel("Open website or search")
             }
+            .foregroundStyle(.white)
             .padding(.leading, 28).padding(.trailing, 19)
             .background(
               reduceTransparency ? Color(nsColor: .windowBackgroundColor) : .clear, in: Capsule()
             )
-            .glassEffect(
-              reduceTransparency ? .identity : .regular,
-              in: .capsule
-            )
+            .background {
+              Capsule().fill(
+                LinearGradient(
+                  stops: [
+                    .init(color: .black.opacity(0.96), location: 0),
+                    .init(color: .black.opacity(0.75), location: 0.28),
+                    .init(color: .black.opacity(0.32), location: 0.60),
+                    .init(color: .clear, location: 1),
+                  ],
+                  startPoint: .top, endPoint: .bottom
+                )
+              )
+              .allowsHitTesting(false)
+              .accessibilityHidden(true)
+            }
+            .background {
+              if !reduceTransparency {
+                NewTabBackdropBlur()
+                  .allowsHitTesting(false)
+                  .accessibilityHidden(true)
+              }
+            }
             .overlay {
               if !reduceTransparency {
                 Capsule().strokeBorder(glow, lineWidth: 2).blur(radius: 7)
@@ -143,5 +165,30 @@ struct NewTabSearch: View {
   private func dismiss() {
     isFocused = false
     session.showsNewTabSearch = false
+  }
+}
+
+private struct NewTabBackdropBlur: NSViewRepresentable {
+  func makeNSView(context: Context) -> PillVisualEffectView {
+    let view = PillVisualEffectView()
+    view.material = .hudWindow
+    view.blendingMode = .withinWindow
+    view.state = .active
+    view.appearance = NSAppearance(named: .darkAqua)
+    view.alphaValue = 0.85
+    return view
+  }
+
+  func updateNSView(_ view: PillVisualEffectView, context: Context) {}
+}
+
+// SwiftUI masks composite a native effect into an offscreen surface, preventing
+// it from sampling the WKWebView behind it. Clip in AppKit instead.
+private final class PillVisualEffectView: NSVisualEffectView {
+  override func layout() {
+    super.layout()
+    wantsLayer = true
+    layer?.cornerRadius = bounds.height / 2
+    layer?.masksToBounds = true
   }
 }

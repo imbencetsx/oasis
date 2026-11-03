@@ -9,13 +9,12 @@
     <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>1.0</string>
-    <key>CFBundleVersion</key><string>17</string>
+    <key>CFBundleVersion</key><string>18</string>
     <key>LSMinimumSystemVersion</key><string>26.0</string>
     <key>LSApplicationCategoryType</key><string>public.app-category.productivity</string>
     <key>NSHighResolutionCapable</key><true/>
     <key>NSCameraUsageDescription</key><string>[oasis] allows websites you approve to use your camera.</string>
     <key>NSMicrophoneUsageDescription</key><string>[oasis] allows websites you approve to use your microphone.</string>
-    <key>NSScreenCaptureUsageDescription</key><string>[oasis] shares only its own browser window with websites you approve.</string>
     <key>NSAppTransportSecurity</key><dict>
         <key>NSAllowsArbitraryLoadsInWebContent</key><true/>
         <key>NSAllowsLocalNetworking</key><true/>

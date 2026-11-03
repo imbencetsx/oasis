@@ -222,7 +222,7 @@ private struct BrowserSettingsPage: View {
             }
             Section("About [oasis]") {
                 LabeledContent("Version", value: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0")
-                LabeledContent("Web engine", value: "System WebKit")
+                LabeledContent("Web engine", value: "Chromium (CEF 156)")
             }
         }
     }

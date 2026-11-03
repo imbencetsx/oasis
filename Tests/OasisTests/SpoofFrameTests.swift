@@ -144,6 +144,7 @@ import WebKit
     @Test func fullscreenStaysActiveUntilSpoofModeIsDisabled() async throws {
         let tab = BrowserTab(isPrivate: true, spoofModeEnabled: false)
         defer { tab.close() }
+        tab.webView.frame = CGRect(x: 0, y: 0, width: 640, height: 480)
         tab.webView.loadHTMLString("<title>Fullscreen</title><div id='target'></div>", baseURL: nil)
         for _ in 0..<100 {
             if tab.webView.title == "Fullscreen" && !tab.webView.isLoading { break }
@@ -157,6 +158,13 @@ import WebKit
             window.nativeFullscreen = Object.getOwnPropertyDescriptor(Document.prototype, 'fullscreenElement').get;
             window.originalWebkitRequest = Element.prototype.webkitRequestFullscreen;
             window.originalWebkitExit = document.webkitExitFullscreen;
+            window.screenReport = () => JSON.stringify([
+                screen.width, screen.height, screen.availWidth, screen.availHeight,
+                outerWidth, outerHeight, screenX, screenY, window.fullScreen,
+                matchMedia('(display-mode: fullscreen)').matches,
+                matchMedia('(display-mode: browser)').matches]);
+            window.originalScreenReport = screenReport();
+            window.fullscreenQuery = matchMedia('(display-mode: fullscreen)');
             window.changes = 0;
             document.addEventListener('fullscreenchange', () => changes++);
             """)
@@ -166,7 +174,18 @@ import WebKit
                 document.fullscreenElement === document.documentElement &&
                 document.webkitFullscreenElement === document.documentElement &&
                 document.fullscreenEnabled && document.webkitFullscreenEnabled &&
-                document.webkitIsFullScreen && document.webkitFullScreen
+                document.webkitIsFullScreen && document.webkitFullScreen && window.fullScreen &&
+                screen.width === innerWidth && screen.height === innerHeight &&
+                screen.availWidth === innerWidth && screen.availHeight === innerHeight &&
+                outerWidth === innerWidth && outerHeight === innerHeight &&
+                screenX === 0 && screenY === 0 && screenLeft === 0 && screenTop === 0 &&
+                screen.isExtended === false && fullscreenQuery.matches &&
+                !matchMedia('(display-mode: browser)').matches &&
+                !matchMedia('(display-mode: standalone)').matches &&
+                !matchMedia('not all and (display-mode: fullscreen)').matches &&
+                matchMedia('(display-mode: fullscreen) and (min-width: 1px)').matches ===
+                    matchMedia('(min-width: 1px)').matches &&
+                matchMedia('(display-mode: fullscreen) and (min-width: 999999px)').matches === false
                 """) as? Bool
             #expect(active == true)
             let windowed = try await tab.webView.callAsyncJavaScript("""
@@ -193,7 +212,9 @@ import WebKit
                 document.dispatchEvent(new Event('fullscreenchange'));
                 const restored = Element.prototype.requestFullscreen === originalRequest &&
                     document.exitFullscreen === originalExit && document.fullscreenElement === originalFullscreen &&
-                    !Object.hasOwn(document, 'fullscreenElement') && changes === 1;
+                    !Object.hasOwn(document, 'fullscreenElement') && changes === 1 &&
+                    screenReport() === originalScreenReport && !Object.hasOwn(screen, 'width') &&
+                    !Object.hasOwn(window, 'fullScreen');
                 document.body.innerHTML = '<div id="target"></div>';
                 return restored;
                 })()
