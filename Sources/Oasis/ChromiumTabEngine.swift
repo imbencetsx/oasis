@@ -17,6 +17,8 @@ import SwiftUI
     /// The full-screen resolution the page renders at while the fullscreen lock is on.
     private(set) var lockedResolution: CGSize?
     private var appliedLockScale: CGFloat?
+    /// The scale the page has actually been painted at (confirmed after the override).
+    private var renderedLockScale: CGFloat?
     private var metricsOverridden = false
     private var captureViewportActive = false
     /// Out-of-process iframe sessions and their installed script identifiers.
@@ -117,6 +119,7 @@ import SwiftUI
         await refreshFocusEmulation()
         lockedResolution = spoofEnabled && spoofSettings.fullscreen ? SpoofResolution.current(for: host.window) : nil
         appliedLockScale = nil
+        renderedLockScale = nil
         host.needsLayout = true
         host.layoutSubtreeIfNeeded()
         try await applyViewportLock()
@@ -151,13 +154,30 @@ import SwiftUI
     }
 
     /// The fraction of a screencast frame the page occupies. Under the fullscreen
-    /// lock, Chromium sizes frames to the locked resolution but draws the page
-    /// at its on-screen (scaled) size in the top-left corner.
+    /// lock, Chromium sizes frames to the locked resolution but paints the page
+    /// at the emulation scale in the top-left corner. This follows the scale the
+    /// page was painted at, not the live view size, which changes first.
     var captureCrop: CGSize {
-        guard let lockedResolution, let view = browser?.nativeView,
-              view.frame.width >= 1, view.frame.height >= 1 else { return CGSize(width: 1, height: 1) }
-        return CGSize(width: min(1, view.frame.width / lockedResolution.width),
-                      height: min(1, view.frame.height / lockedResolution.height))
+        guard lockedResolution != nil, let scale = renderedLockScale ?? appliedLockScale else { return CGSize(width: 1, height: 1) }
+        let crop = min(1, max(0.01, scale))
+        return CGSize(width: crop, height: crop)
+    }
+
+    /// Screencast frames can lag the page's real geometry by a few hundred
+    /// milliseconds after a resize or scale change; later frames are reliable.
+    static let frameSettleTime: TimeInterval = 0.6
+
+    /// The page view changed size: frames composed around now may mix the old
+    /// and new geometry, so a shared stream skips them.
+    func pageViewDidResize() {
+        guard sharing.isSharing else { return }
+        sharing.acceptFrames(after: Date().timeIntervalSince1970 + Self.frameSettleTime)
+    }
+
+    /// Applies any pending scale change now and waits for it.
+    func settleViewport() async {
+        host.layoutSubtreeIfNeeded()
+        try? await applyViewportLock()
     }
 
     func viewportDidChange() {
@@ -171,14 +191,37 @@ import SwiftUI
         guard let browser else { return }
         if let lockedResolution, let scale = lockScale {
             guard appliedLockScale != scale else { return }
-            if appliedLockScale != nil { sharing.lockScaleWillChange() }
             appliedLockScale = scale
             metricsOverridden = true
+            // A shared stream keeps its last frame until the page has painted at
+            // the new scale, so the cast never shows a zoom step.
+            let holding = sharing.isSharing
+            if holding { sharing.beginHold() }
+            #if DEBUG
+            sharing.traceLog?("scale apply \(scale) view=\(browser.nativeView?.frame.size ?? .zero)")
+            #endif
+            defer { if holding { sharing.endHold(settle: 0.05) } }
             _ = try await browser.devTools("Emulation.setDeviceMetricsOverride", params: [
                 "width": Int(lockedResolution.width), "height": Int(lockedResolution.height),
                 "deviceScaleFactor": 0, "mobile": false, "scale": scale,
                 "screenWidth": Int(lockedResolution.width), "screenHeight": Int(lockedResolution.height)
             ])
+            if holding {
+                // Screencast frames can arrive late. Frames swapped before the page
+                // painted at the new scale are dropped by their own timestamp.
+                let painted = try? await evaluate("""
+                    Promise.race([new Promise(r => requestAnimationFrame(() => requestAnimationFrame(() => r(Date.now())))),
+                                  new Promise(r => setTimeout(() => r(Date.now()), 200))])
+                    """) as? Double
+                sharing.acceptFrames(after: (painted ?? Date().timeIntervalSince1970 * 1000) / 1000 + Self.frameSettleTime)
+                #if DEBUG
+                sharing.traceLog?("painted at \((painted ?? 0) / 1000 - Date().timeIntervalSince1970) relative-to-now")
+                #endif
+            }
+            if appliedLockScale == scale { renderedLockScale = scale }
+            #if DEBUG
+            sharing.traceLog?("scale rendered \(scale) applied=\(appliedLockScale ?? -1)")
+            #endif
         } else if metricsOverridden, !captureViewportActive {
             metricsOverridden = false
             _ = try? await browser.devTools("Emulation.clearDeviceMetricsOverride")
@@ -577,7 +620,11 @@ struct ChromiumHistoryEntry: Identifiable { let id: Int; let url: URL; let title
         if window?.isVisible == true, bounds.width >= 2, bounds.height > topInset {
             lastVisibleSize = bounds.size
         }
-        if let view = engine?.browser?.nativeView { view.frame = engine?.pageFrame(in: pageBounds) ?? pageBounds }
+        if let view = engine?.browser?.nativeView {
+            let frame = engine?.pageFrame(in: pageBounds) ?? pageBounds
+            if view.frame.size != frame.size { engine?.pageViewDidResize() }
+            view.frame = frame
+        }
         engine?.viewportDidChange()
     }
 }

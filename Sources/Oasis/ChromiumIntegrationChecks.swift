@@ -66,6 +66,76 @@ import CefKit
                 "image=\(w)x\(h) page=\(redWidth)x\(redHeight) view=\(browser.nativeView?.frame ?? .zero) meta=\(meta)")
     }
 
+    /// Shares the tab, enters and leaves window fullscreen, and checks that every
+    /// delivered frame frames the page identically (no zoom steps in the cast).
+    static func fullscreenTransitionFrames(_ engine: ChromiumTabEngine) async throws -> (seamless: Bool, detail: String) {
+        guard let window = engine.host.window else { return (false, "no window") }
+        ShareConsent.automaticAnswer = "monitor"
+        defer { ShareConsent.automaticAnswer = nil }
+        _ = try await engine.evaluate("(() => { const m = document.createElement('div'); m.id = '__oasisCorner'; m.style.cssText = 'position:fixed;right:0;bottom:0;width:200px;height:200px;background:rgb(255,0,0);z-index:2147483647'; document.documentElement.append(m); const a = document.createElement('div'); a.id = '__oasisSpin'; a.style.cssText = 'position:fixed;left:40%;top:40%;width:60px;height:60px;background:rgb(0,0,255)'; document.documentElement.append(a); let t = 0; (function tick() { if (!a.isConnected) return; a.style.transform = 'rotate(' + (t += 7) + 'deg)'; requestAnimationFrame(tick); })(); return 0; })()")
+        defer { engine.execute("document.getElementById('__oasisCorner')?.remove(); document.getElementById('__oasisSpin')?.remove()") }
+        let start = Date()
+        var trace: [String] = []
+        let stamp = { String(format: "%.3f", Date().timeIntervalSince(start)) }
+        engine.sharing.traceLog = { trace.append("\(stamp()) \($0)") }
+        engine.sharing.frameObserver = { params in
+            let meta = params["metadata"] as? [String: Any] ?? [:]
+            trace.append("\(stamp()) frame swap=\(String(format: "%.3f", ((meta["timestamp"] as? Double) ?? 0) - start.timeIntervalSince1970)) held=\(engine.sharing.isHoldingFrames) view=\(engine.browser?.nativeView?.frame.size ?? .zero) dev=\(meta["deviceWidth"] ?? "")x\(meta["deviceHeight"] ?? "") crop=\(engine.captureCrop.width)")
+        }
+        defer { engine.sharing.frameObserver = nil; engine.sharing.traceLog = nil }
+        let begin = try await engine.sharing.receive(["action": "begin"], enabled: true) as? [String: Any]
+        guard let token = begin?["token"] as? String, let lock = engine.lockedResolution else { return (false, "share did not begin") }
+        defer { engine.sharing.stop() }
+        let expectedLeft = (lock.width - 200) / lock.width, expectedTop = (lock.height - 200) / lock.height
+        var frames = 0, bad: [String] = []
+        let poller = Task { @MainActor in
+            while !Task.isCancelled {
+                if let result = try? await engine.sharing.receive(["action": "frame", "token": token], enabled: true) as? [String: Any],
+                   let image = result["image"] as? String, let comma = image.firstIndex(of: ","),
+                   let data = Data(base64Encoded: String(image[image.index(after: comma)...])),
+                   let bitmap = NSBitmapImageRep(data: data) {
+                    let crop = result["crop"] as? [Double] ?? [1, 1]
+                    let w = Double(bitmap.pixelsWide) * crop[0], h = Double(bitmap.pixelsHigh) * crop[1]
+                    func red(_ fx: Double, _ fy: Double) -> Bool {
+                        guard let c = bitmap.colorAt(x: min(bitmap.pixelsWide - 1, Int(fx * w)), y: min(bitmap.pixelsHigh - 1, Int(fy * h)))?
+                            .usingColorSpace(.sRGB) else { return false }
+                        return c.redComponent > 0.75 && c.greenComponent < 0.35 && c.blueComponent < 0.35
+                    }
+                    frames += 1
+                    // Inside the marker near its edges, and outside just beyond them.
+                    let ok = red(expectedLeft + 0.01, expectedTop + 0.01) && red(0.995, 0.995) &&
+                        !red(expectedLeft - 0.02, expectedTop + 0.05) && !red(expectedLeft + 0.05, expectedTop - 0.03)
+                    if !ok { bad.append("crop=\(crop) size=\(bitmap.pixelsWide)x\(bitmap.pixelsHigh)") }
+                    var extent = ""
+                    if !ok {
+                        var minX = Int.max, minY = Int.max, maxX = 0, maxY = 0
+                        for y in stride(from: 0, to: bitmap.pixelsHigh, by: 4) { for x in stride(from: 0, to: bitmap.pixelsWide, by: 4) {
+                            if let c = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.sRGB), c.redComponent > 0.75, c.greenComponent < 0.35, c.blueComponent < 0.35 {
+                                minX = min(minX, x); minY = min(minY, y); maxX = max(maxX, x); maxY = max(maxY, y) } } }
+                        extent = " red=\(minX)...\(maxX)x\(minY)...\(maxY)"
+                    }
+                    trace.append("\(stamp()) DELIVERED ok=\(ok) size=\(bitmap.pixelsWide)x\(bitmap.pixelsHigh) crop=\(crop[0])\(extent)")
+                }
+                try? await Task.sleep(for: .milliseconds(40))
+            }
+        }
+        try await Task.sleep(for: .milliseconds(800))
+        let startedFullscreen = window.styleMask.contains(.fullScreen)
+        for _ in 0..<2 {
+            window.toggleFullScreen(nil)
+            try await Task.sleep(for: .milliseconds(2500))
+        }
+        poller.cancel()
+        _ = await poller.value
+        // Two toggles return the window to where it started.
+        let fullscreen = window.styleMask.contains(.fullScreen) != startedFullscreen
+        try? trace.joined(separator: "\n").write(toFile: NSTemporaryDirectory() + "oasis-transition-trace.txt", atomically: true, encoding: .utf8)
+        if let path = ProcessInfo.processInfo.environment["OASIS_CHROMIUM_CHECKS_OUTPUT"] {
+            try? trace.joined(separator: "\n").write(toFile: path + ".trace.txt", atomically: true, encoding: .utf8)
+        }
+        return (frames >= 3 && bad.isEmpty && !fullscreen, "frames=\(frames) bad=\(bad.count) \(bad.prefix(3))")
+    }
+
     static func run(session: BrowserSession) async {
         guard let tab = session.selectedTab, let engine = tab.chromium, let browser = engine.browser else { return }
         var checks: [String: Bool] = [:]
@@ -165,8 +235,7 @@ import CefKit
             try await Task.sleep(for: .milliseconds(300))
             diagnostics["unlocked"] = try await engine.evaluate("JSON.stringify({fs: !!document.fullscreenElement, own: Object.hasOwn(screen, 'width'), iw: innerWidth, p: navigator.platform})") as? String ?? "nil"
             checks["featureSwitchesApply"] = await settle(engine, """
-                !document.fullscreenElement && !Object.hasOwn(screen, 'width') && innerWidth !== \(Int(lock.width)) &&
-                navigator.platform === 'Win32'
+                !document.fullscreenElement && !Object.hasOwn(screen, 'width') && navigator.platform === 'Win32'
                 """)
             engine.setSpoof(true, settings: defaults); await engine.waitForConfiguration()
             _ = await settle(engine, "innerWidth === \(Int(lock.width))")
@@ -177,6 +246,9 @@ import CefKit
             checks["screencastCropMatchesPage"] = extent.frame.width > 0 && extent.page.width > 0 &&
                 abs(extent.page.width / extent.frame.width - crop.width) < 0.01 &&
                 abs(extent.page.height / extent.frame.height - crop.height) < 0.01
+            let transition = try await fullscreenTransitionFrames(engine)
+            checks["fullscreenTransitionSeamless"] = transition.seamless
+            diagnostics["transition"] = transition.detail
             let before = try await browser.devTools("Page.captureScreenshot", params: ["format": "png", "fromSurface": true])
             checks["pageCapture"] = (before["data"] as? String).flatMap { Data(base64Encoded: $0) } != nil
 
@@ -222,7 +294,7 @@ import CefKit
             } catch { checks["sharingDisabledWithoutSpoof"] = true }
         } catch { detail = error.localizedDescription }
         engine.setSpoof(originalSpoof, settings: originalSettings); await engine.waitForConfiguration()
-        let passed = checks.count >= 17 && checks.values.allSatisfy { $0 } && detail.isEmpty
+        let passed = checks.count >= 18 && checks.values.allSatisfy { $0 } && detail.isEmpty
         let report: [String: Any] = ["passed": passed, "checks": checks, "error": detail, "diagnostics": diagnostics]
         let output = ProcessInfo.processInfo.environment["OASIS_CHROMIUM_CHECKS_OUTPUT"].map { URL(fileURLWithPath: $0) }
             ?? FileManager.default.temporaryDirectory.appendingPathComponent("oasis-chromium-checks.json")

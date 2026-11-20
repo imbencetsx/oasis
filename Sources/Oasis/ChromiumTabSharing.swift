@@ -13,8 +13,27 @@ import CefKit
     private var latestFrame: String?
     /// The part of the latest frame the page occupies (see `ChromiumTabEngine.captureCrop`).
     private var latestCrop = CGSize(width: 1, height: 1)
-    /// Frames are dropped briefly while the fullscreen lock's scale changes.
+    /// Frames are dropped while the fullscreen lock's scale changes and during
+    /// window fullscreen transitions; the stream keeps its last good frame.
     private var holdFramesUntil = Date.distantPast
+    private var holds = 0
+    /// Frames swapped before this time (seconds since 1970) show an earlier scale.
+    private var minimumFrameTime: Double = 0
+    private var holdStarted = Date.distantPast
+    /// The window's fullscreen animation in progress, and when it began.
+    private var transitionStarted: Date?
+    private var transitionGeneration = 0
+    private var transitionObservers: [NSObjectProtocol] = []
+    /// Frame canvas size while the page's view and scale agree. Chromium sizes
+    /// transitional frames differently; those are never shown.
+    private var steadyFrameSize: CGSize?
+    private var oddFramesSince: Date?
+    private var framesHeld: Bool {
+        // A hold never freezes the stream for long, even if a transition stalls.
+        if let transitionStarted, Date().timeIntervalSince(transitionStarted) < 3 { return true }
+        if holds > 0 && Date().timeIntervalSince(holdStarted) < 2 { return true }
+        return Date() < holdFramesUntil
+    }
     private var frameSequence = 0
     private var deliveredSequence = -1
     private var cursorImage: NSImage?
@@ -37,6 +56,9 @@ import CefKit
         latestFrame = nil; frameSequence = 0; deliveredSequence = -1
         cursorImage = nil; cursorURL = nil; parkedPoint = nil
         lastInsideScreenPoint = nil; wasAway = false
+        for observer in transitionObservers { NotificationCenter.default.removeObserver(observer) }
+        transitionObservers = []; holds = 0; transitionStarted = nil; transitionGeneration += 1
+        holdFramesUntil = .distantPast; minimumFrameTime = 0; steadyFrameSize = nil; oddFramesSince = nil
         if let statusItem { NSStatusBar.system.removeStatusItem(statusItem) }
         statusItem = nil
         if let activity { ProcessInfo.processInfo.endActivity(activity) }
@@ -54,7 +76,8 @@ import CefKit
 
     func receive(_ body: [String: String], enabled: Bool) async throws -> Any {
         guard enabled, let engine, let browser = engine.browser,
-              browser.url?.scheme == "https", let action = body["action"] else {
+              browser.url?.scheme == "https" || Self.allowsLoopbackForChecks(browser.url),
+              let action = body["action"] else {
             throw failure("Tab sharing requires an HTTPS top-level page and Spoof Mode.")
         }
         if action == "begin" {
@@ -114,6 +137,7 @@ import CefKit
             let stopItem = NSMenuItem(title: "Stop Sharing", action: #selector(SharingMenuTarget.stopSharing), keyEquivalent: "")
             stopItem.target = menuTarget; menu.addItem(stopItem); item.menu = menu
             statusItem = item
+            observeFullscreenTransitions()
             return ["token": token!, "width": framing.width, "height": framing.height, "surface": surface]
         }
         guard let token, body["token"] == token else { return ["ended": true] }
@@ -144,15 +168,105 @@ import CefKit
     }
 
     /// Retain a single compositor frame; dropping superseded frames keeps latency bounded.
-    /// The page's scale is changing (window resize or fullscreen). Frames in
-    /// flight still show the old scale, so keep the last good frame meanwhile.
-    func lockScaleWillChange() {
+    /// The page's scale is changing. Frames in flight still show the old scale,
+    /// so keep the last good frame until `endHold`.
+    func beginHold() {
         guard token != nil else { return }
-        holdFramesUntil = Date().addingTimeInterval(0.25)
+        holdStarted = Date()
+        holds += 1
+    }
+
+    func acceptFrames(after time: Double) {
+        guard token != nil else { return }
+        minimumFrameTime = max(minimumFrameTime, time)
+    }
+
+    func endHold(settle: TimeInterval) {
+        guard holds > 0 else { return }
+        holds -= 1
+        holdFramesUntil = max(holdFramesUntil, Date().addingTimeInterval(settle))
+    }
+
+    /// The window animates through many sizes when entering or leaving
+    /// fullscreen. Hold the stream for the whole transition and release it once
+    /// the final scale has been painted.
+    private func observeFullscreenTransitions() {
+        let center = NotificationCenter.default
+        let begin: [Notification.Name] = [NSWindow.willEnterFullScreenNotification, NSWindow.willExitFullScreenNotification]
+        // A transition that fails never posts its "did" notification; the hold's
+        // time limit releases the stream then.
+        let end: [Notification.Name] = [NSWindow.didEnterFullScreenNotification, NSWindow.didExitFullScreenNotification]
+        for name in begin {
+            transitionObservers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] note in
+                let window = note.object as? NSWindow
+                MainActor.assumeIsolated {
+                    guard let self, self.token != nil, window != nil, window === self.engine?.host.window else { return }
+                    self.transitionGeneration += 1
+                    self.transitionStarted = Date()
+                    #if DEBUG
+                    self.traceLog?("transition begin \(name.rawValue)")
+                    #endif
+                }
+            })
+        }
+        for name in end {
+            transitionObservers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] note in
+                let window = note.object as? NSWindow
+                MainActor.assumeIsolated {
+                    guard let self, window != nil, window === self.engine?.host.window, self.transitionStarted != nil else { return }
+                    let generation = self.transitionGeneration
+                    #if DEBUG
+                    self.traceLog?("transition end \(name.rawValue)")
+                    #endif
+                    // Layout settles just after the transition; let the final scale paint.
+                    // A newer transition that started meanwhile keeps its own hold.
+                    Task { @MainActor [weak self] in
+                        try? await Task.sleep(for: .milliseconds(150))
+                        await self?.engine?.settleViewport()
+                        guard let self, self.transitionGeneration == generation else { return }
+                        self.transitionStarted = nil
+                        self.holdFramesUntil = max(self.holdFramesUntil, Date().addingTimeInterval(0.1))
+                    }
+                }
+            })
+        }
+    }
+
+    /// Reads a JPEG's pixel size from its frame header without decoding it.
+    static func jpegSize(base64: String) -> CGSize? {
+        guard let data = Data(base64Encoded: String(base64.prefix(8192 - 8192 % 4)), options: .ignoreUnknownCharacters) else { return nil }
+        let bytes = [UInt8](data)
+        guard bytes.count > 4, bytes[0] == 0xFF, bytes[1] == 0xD8 else { return nil }
+        var index = 2
+        while index + 9 < bytes.count {
+            guard bytes[index] == 0xFF else { return nil }
+            let marker = bytes[index + 1]
+            if marker == 0xFF { index += 1; continue }
+            // SOF0–SOF15 except DHT (C4), JPG (C8) and DAC (CC).
+            if (0xC0...0xCF).contains(marker) && ![0xC4, 0xC8, 0xCC].contains(marker) {
+                let height = Int(bytes[index + 5]) << 8 | Int(bytes[index + 6])
+                let width = Int(bytes[index + 7]) << 8 | Int(bytes[index + 8])
+                return CGSize(width: width, height: height)
+            }
+            let length = Int(bytes[index + 2]) << 8 | Int(bytes[index + 3])
+            guard length >= 2 else { return nil }
+            index += 2 + length
+        }
+        return nil
+    }
+
+    private static func allowsLoopbackForChecks(_ url: URL?) -> Bool {
+        #if DEBUG
+        return ShareConsent.automaticAnswer != nil && url?.scheme == "http" && url?.host == "127.0.0.1"
+        #else
+        return false
+        #endif
     }
 
     #if DEBUG
     var frameObserver: (([String: Any]) -> Void)?
+    var traceLog: ((String) -> Void)?
+    var isHoldingFrames: Bool { framesHeld }
     #endif
 
     func receiveScreencastFrame(_ params: [String: Any]) {
@@ -160,7 +274,24 @@ import CefKit
         #if DEBUG
         frameObserver?(params)
         #endif
-        if token != nil, let data = params["data"] as? String, Date() >= holdFramesUntil, let engine {
+        let swapped = (params["metadata"] as? [String: Any])?["timestamp"] as? Double ?? .infinity
+        if token != nil, let data = params["data"] as? String, !framesHeld, swapped >= minimumFrameTime, let engine,
+           let size = Self.jpegSize(base64: data) {
+            // Only the fullscreen lock has a fixed frame size. A size that persists
+            // (for example after the lock's resolution changed) becomes the new one.
+            if engine.lockedResolution == nil || steadyFrameSize == nil { steadyFrameSize = size }
+            let steady = steadyFrameSize ?? size
+            let matches = abs(size.width - steady.width) <= 2 && abs(size.height - steady.height) <= 2
+            if matches { oddFramesSince = nil }
+            else if let since = oddFramesSince, Date().timeIntervalSince(since) > 1 { steadyFrameSize = size; oddFramesSince = nil }
+            else {
+                if oddFramesSince == nil { oddFramesSince = Date() }
+                #if DEBUG
+                traceLog?("dropped odd frame \(size)")
+                #endif
+                browser.sendDevToolsMessage("Page.screencastFrameAck", params: ["sessionId": sessionID])
+                return
+            }
             latestFrame = "data:image/jpeg;base64," + data
             latestCrop = engine.captureCrop
             frameSequence += 1

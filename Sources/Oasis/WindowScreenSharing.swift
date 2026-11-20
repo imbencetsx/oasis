@@ -352,7 +352,15 @@ import WebKit
     static let reportAsKey = "spoofShareReportAs"
 
     /// Returns the reported display surface ("monitor" or "browser"), or nil if declined.
+    #if DEBUG
+    /// Automated checks answer the sheet without showing it.
+    static var automaticAnswer: String?
+    #endif
+
     static func ask(host: String, window: NSWindow, reportAs: Bool) async -> String? {
+        #if DEBUG
+        if let automaticAnswer { return automaticAnswer }
+        #endif
         let alert = NSAlert()
         alert.messageText = "Share this tab with \(host)?"
         alert.informativeText = "Only this tab's website will be shared, without browser controls. Switching tabs won't change the shared page. Stop from the Sharing menu in the macOS menu bar. Available only in Spoof Mode."

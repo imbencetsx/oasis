@@ -273,6 +273,14 @@ import WebKit
         #expect(result == true)
     }
 
+    @Test func jpegFrameSizeIsReadFromTheHeader() throws {
+        let bitmap = try #require(NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 37, pixelsHigh: 21, bitsPerSample: 8,
+            samplesPerPixel: 3, hasAlpha: false, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0))
+        let jpeg = try #require(bitmap.representation(using: .jpeg, properties: [.compressionFactor: 0.7]))
+        #expect(ChromiumTabSharing.jpegSize(base64: jpeg.base64EncodedString()) == CGSize(width: 37, height: 21))
+        #expect(ChromiumTabSharing.jpegSize(base64: Data("not a jpeg".utf8).base64EncodedString()) == nil)
+    }
+
     @Test func lockedFramesAreCroppedToThePage() async throws {
         let tab = try await loadedTab()
         defer { tab.close() }
