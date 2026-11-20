@@ -12,7 +12,7 @@ import CefKit
         Task { @MainActor in
             var session: BrowserSession?
             for _ in 0..<200 {
-                session = BrowserLibrary.shared.activeSession
+                session = BrowserLibrary.shared.anySession
                 if session != nil { break }
                 try? await Task.sleep(for: .milliseconds(100))
             }
@@ -35,6 +35,35 @@ import CefKit
             try? await Task.sleep(for: .milliseconds(100))
         }
         return false
+    }
+
+    /// Where the page's content lies inside one screencast frame.
+    static func screencastExtent(_ engine: ChromiumTabEngine, maxWidth: Int = 4000, maxHeight: Int = 4000) async
+        -> (frame: CGSize, page: CGSize, description: String) {
+        guard let browser = engine.browser else { return (.zero, .zero, "no browser") }
+        _ = try? await engine.evaluate("(() => { const m = document.createElement('div'); m.id = '__oasisCorner'; m.style.cssText = 'position:fixed;right:0;bottom:0;width:200px;height:200px;background:rgb(255,0,0);z-index:2147483647'; document.documentElement.append(m); return 0; })()")
+        try? await Task.sleep(for: .milliseconds(200))
+        var frame: [String: Any]?
+        engine.sharing.frameObserver = { frame = $0 }
+        _ = try? await browser.devTools("Page.startScreencast", params: ["format": "png", "maxWidth": maxWidth, "maxHeight": maxHeight, "everyNthFrame": 1])
+        for _ in 0..<50 where frame == nil { try? await Task.sleep(for: .milliseconds(100)) }
+        engine.sharing.frameObserver = nil
+        _ = try? await browser.devTools("Page.stopScreencast")
+        _ = try? await engine.evaluate("document.getElementById('__oasisCorner')?.remove(); 0")
+        guard let frame, let text = frame["data"] as? String, let data = Data(base64Encoded: text),
+              let bitmap = NSBitmapImageRep(data: data) else { return (.zero, .zero, "no frame") }
+        func red(_ x: Int, _ y: Int) -> Bool {
+            guard let c = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.sRGB) else { return false }
+            return c.redComponent > 0.8 && c.greenComponent < 0.3
+        }
+        let w = bitmap.pixelsWide, h = bitmap.pixelsHigh
+        // The marker's bottom-right corner shows how much of the frame the page fills.
+        var redWidth = 0, redHeight = 0
+        for y in stride(from: 0, to: h, by: 2) { for x in stride(from: 0, to: w, by: 2) where red(x, y) {
+            redWidth = max(redWidth, x + 1); redHeight = max(redHeight, y + 1) } }
+        let meta = (frame["metadata"] as? [String: Any]).map { "\($0)" } ?? ""
+        return (CGSize(width: w, height: h), CGSize(width: redWidth, height: redHeight),
+                "image=\(w)x\(h) page=\(redWidth)x\(redHeight) view=\(browser.nativeView?.frame ?? .zero) meta=\(meta)")
     }
 
     static func run(session: BrowserSession) async {
@@ -141,6 +170,13 @@ import CefKit
                 """)
             engine.setSpoof(true, settings: defaults); await engine.waitForConfiguration()
             _ = await settle(engine, "innerWidth === \(Int(lock.width))")
+            // Shared frames are cropped to the page's part of each screencast frame.
+            let extent = await screencastExtent(engine)
+            diagnostics["screencast"] = extent.description
+            let crop = engine.captureCrop
+            checks["screencastCropMatchesPage"] = extent.frame.width > 0 && extent.page.width > 0 &&
+                abs(extent.page.width / extent.frame.width - crop.width) < 0.01 &&
+                abs(extent.page.height / extent.frame.height - crop.height) < 0.01
             let before = try await browser.devTools("Page.captureScreenshot", params: ["format": "png", "fromSurface": true])
             checks["pageCapture"] = (before["data"] as? String).flatMap { Data(base64Encoded: $0) } != nil
 
@@ -186,7 +222,7 @@ import CefKit
             } catch { checks["sharingDisabledWithoutSpoof"] = true }
         } catch { detail = error.localizedDescription }
         engine.setSpoof(originalSpoof, settings: originalSettings); await engine.waitForConfiguration()
-        let passed = checks.count >= 16 && checks.values.allSatisfy { $0 } && detail.isEmpty
+        let passed = checks.count >= 17 && checks.values.allSatisfy { $0 } && detail.isEmpty
         let report: [String: Any] = ["passed": passed, "checks": checks, "error": detail, "diagnostics": diagnostics]
         let output = ProcessInfo.processInfo.environment["OASIS_CHROMIUM_CHECKS_OUTPUT"].map { URL(fileURLWithPath: $0) }
             ?? FileManager.default.temporaryDirectory.appendingPathComponent("oasis-chromium-checks.json")

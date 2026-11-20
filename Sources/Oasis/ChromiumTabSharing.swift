@@ -11,6 +11,10 @@ import CefKit
     private var surface = "monitor"
     private var parkedPoint: CGPoint?
     private var latestFrame: String?
+    /// The part of the latest frame the page occupies (see `ChromiumTabEngine.captureCrop`).
+    private var latestCrop = CGSize(width: 1, height: 1)
+    /// Frames are dropped briefly while the fullscreen lock's scale changes.
+    private var holdFramesUntil = Date.distantPast
     private var frameSequence = 0
     private var deliveredSequence = -1
     private var cursorImage: NSImage?
@@ -77,9 +81,17 @@ import CefKit
             token = UUID().uuidString
             await engine.refreshFocusEmulation()
             do {
+                // Under the fullscreen lock, frames have the locked resolution with the
+                // page drawn scaled into their top-left corner. Request them large
+                // enough to keep the page's detail; each frame is cropped to the page.
+                var maxSize = CGSize(width: framing.width, height: framing.height)
+                if let lock = engine.lockedResolution {
+                    let backing = engine.host.window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 1
+                    maxSize = CGSize(width: lock.width * backing, height: lock.height * backing)
+                }
                 _ = try await browser.devTools("Page.startScreencast", params: [
-                    "format": "jpeg", "quality": 75, "maxWidth": framing.width,
-                    "maxHeight": framing.height, "everyNthFrame": 1
+                    "format": "jpeg", "quality": 75, "maxWidth": Int(maxSize.width),
+                    "maxHeight": Int(maxSize.height), "everyNthFrame": 1
                 ])
                 // The bridge needs a first frame before it can return a MediaStream.
                 for _ in 0..<200 {
@@ -117,6 +129,7 @@ import CefKit
         } else {
             deliveredSequence = frameSequence
             result["image"] = latestFrame
+            result["crop"] = [Double(latestCrop.width), Double(latestCrop.height)]
         }
         if let cursor, let cursorURL {
             let scale = Double(framing.width) / initialSize.width
@@ -131,10 +144,25 @@ import CefKit
     }
 
     /// Retain a single compositor frame; dropping superseded frames keeps latency bounded.
+    /// The page's scale is changing (window resize or fullscreen). Frames in
+    /// flight still show the old scale, so keep the last good frame meanwhile.
+    func lockScaleWillChange() {
+        guard token != nil else { return }
+        holdFramesUntil = Date().addingTimeInterval(0.25)
+    }
+
+    #if DEBUG
+    var frameObserver: (([String: Any]) -> Void)?
+    #endif
+
     func receiveScreencastFrame(_ params: [String: Any]) {
         guard let browser = engine?.browser, let sessionID = params["sessionId"] as? Int else { return }
-        if token != nil, let data = params["data"] as? String {
+        #if DEBUG
+        frameObserver?(params)
+        #endif
+        if token != nil, let data = params["data"] as? String, Date() >= holdFramesUntil, let engine {
             latestFrame = "data:image/jpeg;base64," + data
+            latestCrop = engine.captureCrop
             frameSequence += 1
         }
         // Immediately acknowledge the screencast frame so Chromium never throttles or stalls.

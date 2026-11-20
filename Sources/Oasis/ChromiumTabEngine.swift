@@ -150,6 +150,16 @@ import SwiftUI
         return SpoofResolution.fit(lockedResolution, in: bounds).scale
     }
 
+    /// The fraction of a screencast frame the page occupies. Under the fullscreen
+    /// lock, Chromium sizes frames to the locked resolution but draws the page
+    /// at its on-screen (scaled) size in the top-left corner.
+    var captureCrop: CGSize {
+        guard let lockedResolution, let view = browser?.nativeView,
+              view.frame.width >= 1, view.frame.height >= 1 else { return CGSize(width: 1, height: 1) }
+        return CGSize(width: min(1, view.frame.width / lockedResolution.width),
+                      height: min(1, view.frame.height / lockedResolution.height))
+    }
+
     func viewportDidChange() {
         guard ready, lockedResolution != nil, host.window != nil, lockScale != appliedLockScale else { return }
         Task { [weak self] in try? await self?.applyViewportLock() }
@@ -161,6 +171,7 @@ import SwiftUI
         guard let browser else { return }
         if let lockedResolution, let scale = lockScale {
             guard appliedLockScale != scale else { return }
+            if appliedLockScale != nil { sharing.lockScaleWillChange() }
             appliedLockScale = scale
             metricsOverridden = true
             _ = try await browser.devTools("Emulation.setDeviceMetricsOverride", params: [

@@ -97,7 +97,17 @@ import WebKit
             };
             sharingStops.set(info.token, finish);
             let cursorImage = null, cursorURL = '';
-            let cachedImage = null, cachedCursor = null;
+            let cachedImage = null, cachedCursor = null, cachedCrop = null;
+            // A frame can carry the fraction of it the page occupies; draw only that part.
+            const drawFrame = () => {
+              const [width, height] = cachedCrop ?? [1, 1];
+              if (width >= 0.999 && height >= 0.999) {
+                context.drawImage(cachedImage, 0, 0, canvas.width, canvas.height);
+              } else {
+                context.drawImage(cachedImage, 0, 0, cachedImage.naturalWidth * width, cachedImage.naturalHeight * height,
+                                  0, 0, canvas.width, canvas.height);
+              }
+            };
             const drawCursor = () => {
               if (cachedCursor && cursorImage && !stopped) {
                 context.drawImage(cursorImage, cachedCursor.x, cachedCursor.y, cachedCursor.width, cachedCursor.height);
@@ -111,23 +121,22 @@ import WebKit
               // Keep the canvas's last image and retry smoothly.
               if (frame?.retry) {
                 if (cachedImage && !stopped) {
-                  context.drawImage(cachedImage, 0, 0, canvas.width, canvas.height);
+                  drawFrame();
                   drawCursor();
                   return true;
                 }
                 return false;
               }
               if (frame?.same) {
-                if (cachedImage && !stopped) {
-                  context.drawImage(cachedImage, 0, 0, canvas.width, canvas.height);
-                }
+                if (cachedImage && !stopped) drawFrame();
               } else {
                 const image = new w.Image();
                 image.src = typeof frame === 'string' ? frame : frame.image;
                 await image.decode();
                 if (stopped) return false;
                 cachedImage = image;
-                context.drawImage(image, 0, 0, canvas.width, canvas.height);
+                cachedCrop = Array.isArray(frame?.crop) ? frame.crop : null;
+                drawFrame();
               }
               // Overlay cursor; without one (cursor containment off and the
               // pointer outside the page) nothing is drawn.

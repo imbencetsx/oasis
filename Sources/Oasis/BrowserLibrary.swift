@@ -47,6 +47,9 @@ final class BrowserLibrary {
     @ObservationIgnored private var saveTask: Task<Void, Never>?
     @ObservationIgnored private var restorationClaimed = false
     @ObservationIgnored private var sessions: [UUID: BrowserSession] = [:]
+    #if DEBUG
+    var anySession: BrowserSession? { activeSession ?? sessions.values.first }
+    #endif
     var activeSession: BrowserSession? {
         sessions.values.first { $0.window?.isKeyWindow == true }
             ?? sessions.values.first { $0.window?.isMainWindow == true }
