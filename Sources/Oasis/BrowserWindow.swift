@@ -599,9 +599,16 @@ final class CloseObserverView: NSView {
     super.init(frame: .zero)
   }
   required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+  /// The buttons slide away with the sidebar. In fullscreen, macOS shows them
+  /// in its own title bar when the pointer reaches the top edge, so they must
+  /// stay in place there regardless of the sidebar.
+  private var buttonsVisible: Bool {
+    showsSidebar || window?.styleMask.contains(.fullScreen) == true || inFullscreenTransition
+  }
+  private var inFullscreenTransition = false
   func configureTrafficLights(showsSidebar: Bool, reduceMotion: Bool) {
     self.showsSidebar = showsSidebar
-    trafficLights?.update(visible: showsSidebar, animated: !reduceMotion)
+    trafficLights?.update(visible: buttonsVisible, animated: !reduceMotion)
   }
   override func viewDidMoveToWindow() {
     super.viewDidMoveToWindow()
@@ -620,7 +627,7 @@ final class CloseObserverView: NSView {
       self.onFullscreenChange(window.styleMask.contains(.fullScreen))
     }
     trafficLights = WindowTrafficLights(window: window)
-    trafficLights?.update(visible: showsSidebar, animated: false)
+    trafficLights?.update(visible: buttonsVisible, animated: false)
     observers.append(NotificationCenter.default.addObserver(
       forName: NSWindow.willCloseNotification, object: window, queue: .main
     ) { [weak self] _ in MainActor.assumeIsolated { self?.onClose() } })
@@ -630,11 +637,18 @@ final class CloseObserverView: NSView {
         MainActor.assumeIsolated { self?.onFullscreenChange(fullscreen) }
       })
     }
-    for name in [NSWindow.didResizeNotification, NSWindow.didEnterFullScreenNotification, NSWindow.didExitFullScreenNotification] {
+    for (name, transition) in [(NSWindow.willEnterFullScreenNotification, true), (NSWindow.willExitFullScreenNotification, true),
+                               (NSWindow.didEnterFullScreenNotification, false), (NSWindow.didExitFullScreenNotification, false)] {
+      observers.append(NotificationCenter.default.addObserver(forName: name, object: window, queue: .main) { [weak self] _ in
+        MainActor.assumeIsolated { self?.inFullscreenTransition = transition }
+      })
+    }
+    for name in [NSWindow.didResizeNotification, NSWindow.willEnterFullScreenNotification, NSWindow.didEnterFullScreenNotification,
+                 NSWindow.willExitFullScreenNotification, NSWindow.didExitFullScreenNotification] {
       observers.append(NotificationCenter.default.addObserver(forName: name, object: window, queue: .main) { [weak self] _ in
         MainActor.assumeIsolated {
           guard let self else { return }
-          self.trafficLights?.update(visible: self.showsSidebar, animated: false, force: true)
+          self.trafficLights?.update(visible: self.buttonsVisible, animated: false, force: true)
         }
       })
     }

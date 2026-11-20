@@ -251,7 +251,8 @@ import WebKit
             requesting = true
             defer { requesting = false }
             let requestGeneration = generation
-            let surface = await ShareConsent.ask(host: message.frameInfo.securityOrigin.host, window: window, reportAs: true)
+            let surface = await ShareConsent.ask(host: message.frameInfo.securityOrigin.host, window: window,
+                                                 reportAs: true, offersScreens: false)?.surface
             guard let surface, enabled, generation == requestGeneration else {
                 throw ShareError.message("Tab sharing was cancelled.")
             }
@@ -346,45 +347,110 @@ import WebKit
     }
 }
 
-/// The share confirmation sheet. In Spoof Mode the website can be told the
-/// share is a full screen or a single tab, like Prism's "Report to website as".
+/// What the user chose to share, and what the website is told it is.
+struct ShareChoice: Sendable, Equatable {
+    /// nil shares the requesting tab; otherwise the entire display.
+    var display: CGDirectDisplayID?
+    /// The reported display surface: "monitor" or "browser".
+    var surface: String
+}
+
+/// The share confirmation sheet: share this tab or an entire screen and, in
+/// Spoof Mode, report it to the website as a full screen or a single tab
+/// (Prism's "Report to website as").
 @MainActor enum ShareConsent {
     static let reportAsKey = "spoofShareReportAs"
 
-    /// Returns the reported display surface ("monitor" or "browser"), or nil if declined.
     #if DEBUG
     /// Automated checks answer the sheet without showing it.
-    static var automaticAnswer: String?
+    static var automaticAnswer: ShareChoice?
     #endif
 
-    static func ask(host: String, window: NSWindow, reportAs: Bool) async -> String? {
+    static func ask(host: String, window: NSWindow, reportAs: Bool, offersScreens: Bool) async -> ShareChoice? {
         #if DEBUG
         if let automaticAnswer { return automaticAnswer }
         #endif
+        let displays = offersScreens ? DisplayCapture.displays : []
         let alert = NSAlert()
-        alert.messageText = "Share this tab with \(host)?"
-        alert.informativeText = "Only this tab's website will be shared, without browser controls. Switching tabs won't change the shared page. Stop from the Sharing menu in the macOS menu bar. Available only in Spoof Mode."
+        alert.messageText = "Share with \(host)?"
+        alert.informativeText = displays.isEmpty
+            ? "Only this tab's website will be shared, without browser controls. Switching tabs won't change the shared page. Stop from the Sharing menu in the macOS menu bar."
+            : "This tab shares only its website, without browser controls. Entire screen shares everything on that display, including the pointer, and needs Screen Recording permission. Stop from the Sharing menu in the macOS menu bar."
         alert.addButton(withTitle: "Don't Allow")
-        alert.addButton(withTitle: "Share Tab")
-        var popup: NSPopUpButton?
-        if reportAs {
-            let menu = NSPopUpButton(frame: NSRect(x: 150, y: 0, width: 150, height: 26), pullsDown: false)
-            menu.addItems(withTitles: ["Full screen", "Single tab"])
-            menu.selectItem(at: UserDefaults.standard.string(forKey: reportAsKey) == "browser" ? 1 : 0)
-            let label = NSTextField(labelWithString: "Report to website as:")
-            label.frame = NSRect(x: 0, y: 4, width: 146, height: 18)
-            label.alignment = .right
-            let container = NSView(frame: NSRect(x: 0, y: 0, width: 300, height: 26))
-            container.addSubview(label); container.addSubview(menu)
-            alert.accessoryView = container
-            popup = menu
-        }
+        alert.addButton(withTitle: "Share")
+        let form = ShareForm(displays: displays, reportAs: reportAs,
+                             rememberedSurface: UserDefaults.standard.string(forKey: reportAsKey))
+        alert.accessoryView = form.view
         let response = await withCheckedContinuation { continuation in
             alert.beginSheetModal(for: window) { continuation.resume(returning: $0) }
         }
         guard response == .alertSecondButtonReturn else { return nil }
-        let surface = popup?.indexOfSelectedItem == 1 ? "browser" : "monitor"
-        if popup != nil { UserDefaults.standard.set(surface, forKey: reportAsKey) }
-        return surface
+        let choice = form.choice
+        if reportAs { UserDefaults.standard.set(choice.surface, forKey: reportAsKey) }
+        return choice
+    }
+}
+
+/// The sheet's controls. Report-as follows the shared target until the user
+/// picks it explicitly, as in Prism.
+@MainActor private final class ShareForm: NSObject {
+    let view: NSView
+    private let target: NSPopUpButton?
+    private let report: NSPopUpButton?
+    private let displays: [DisplayCapture.Display]
+    private let rememberedSurface: String?
+    private var reportChosen = false
+
+    init(displays: [DisplayCapture.Display], reportAs: Bool, rememberedSurface: String?) {
+        self.displays = displays
+        self.rememberedSurface = rememberedSurface
+        var rows: [(String, NSPopUpButton)] = []
+        if displays.isEmpty { target = nil } else {
+            let popup = NSPopUpButton(frame: .zero, pullsDown: false)
+            popup.addItem(withTitle: "This tab")
+            for display in displays {
+                popup.addItem(withTitle: displays.count == 1 ? "Entire screen" : "Entire screen — \(display.name)")
+            }
+            rows.append(("Share:", popup))
+            target = popup
+        }
+        if reportAs {
+            let popup = NSPopUpButton(frame: .zero, pullsDown: false)
+            popup.addItems(withTitles: ["Full screen", "Single tab"])
+            popup.selectItem(at: rememberedSurface == "browser" ? 1 : 0)
+            rows.append(("Report to website as:", popup))
+            report = popup
+        } else { report = nil }
+        let width: CGFloat = 320, rowHeight: CGFloat = 30
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: width, height: CGFloat(rows.count) * rowHeight))
+        for (index, (title, popup)) in rows.enumerated() {
+            let y = CGFloat(rows.count - 1 - index) * rowHeight
+            let label = NSTextField(labelWithString: title)
+            label.alignment = .right
+            label.frame = NSRect(x: 0, y: y + 6, width: 146, height: 18)
+            popup.frame = NSRect(x: 150, y: y + 1, width: width - 150, height: 26)
+            container.addSubview(label); container.addSubview(popup)
+        }
+        view = container
+        super.init()
+        target?.target = self; target?.action = #selector(targetChanged)
+        report?.target = self; report?.action = #selector(reportChanged)
+    }
+
+    @objc private func targetChanged() {
+        guard let report, !reportChosen else { return }
+        let sharesScreen = (target?.indexOfSelectedItem ?? 0) > 0
+        report.selectItem(at: sharesScreen ? 0 : (rememberedSurface == "browser" ? 1 : 0))
+    }
+
+    @objc private func reportChanged() { reportChosen = true }
+
+    var choice: ShareChoice {
+        let index = target?.indexOfSelectedItem ?? 0
+        let display = index > 0 && index <= displays.count ? displays[index - 1].id : nil
+        let surface: String
+        if let report { surface = report.indexOfSelectedItem == 1 ? "browser" : "monitor" }
+        else { surface = display == nil ? "browser" : "monitor" }
+        return ShareChoice(display: display, surface: surface)
     }
 }

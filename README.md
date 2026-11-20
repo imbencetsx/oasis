@@ -78,21 +78,28 @@ Spoof Mode also covers embedded frames, including cross-site frames that run in
 a separate renderer process. It is best effort: sites can still observe other
 signals, and it cannot guarantee that switching tabs or windows is undetectable.
 
-### Tab sharing
+### Screen and tab sharing
 
-With **Spoof Mode** and screenshare spoofing enabled, an HTTPS page can request
-sharing of its own tab. Approve **Share Tab** to start. Only that tab's webview
-is captured: no address bar, sidebar, other tabs, desktop, or audio. The feed
-stays tied to the originating tab when you open or switch to another tab, and it
-keeps updating in the background. Native Screen Recording permission is not
-required.
+With **Spoof Mode** and screenshare spoofing enabled, an HTTPS page can ask to
+share your screen. The share sheet offers:
 
-The feed uses a fixed canvas up to 1440 pixels wide. Temporary snapshot failures
-retain the last frame and retry automatically. Use **Sharing → Stop Sharing** in
-the macOS menu bar to stop; navigating or closing the shared tab, or disabling
-Spoof Mode, also stops it. Changing other Spoof Mode settings keeps a share
-running. The custom sharing API and metadata patches are removed when Spoof Mode
-is disabled; website/server acceptance depends on their other checks.
+- **This tab** – only this tab's webview is captured: no address bar, sidebar,
+  other tabs, desktop, or audio. The feed stays tied to the originating tab when
+  you switch tabs, keeps updating in the background, and needs no Screen
+  Recording permission. Entering or leaving fullscreen never shows a zoom step
+  in the feed.
+- **Entire screen** – the whole display (one entry per display), including the
+  pointer, through ScreenCaptureKit. macOS asks for Screen Recording permission
+  the first time; allow [oasis] in System Settings › Privacy & Security ›
+  Screen & System Audio Recording, then reopen it and share again.
+
+**Report to website as** chooses whether the website sees a full screen or a
+single tab, whatever is actually shared. Feeds are up to 1440 (tab) or 1600
+(screen) pixels wide. Use **Sharing → Stop Sharing** in the macOS menu bar to
+stop; navigating or closing the sharing tab, or disabling Spoof Mode, also stops
+it. Changing other Spoof Mode settings keeps a share running. The custom sharing
+API and metadata patches are removed when Spoof Mode is disabled;
+website/server acceptance depends on their other checks.
 
 ## Your data
 

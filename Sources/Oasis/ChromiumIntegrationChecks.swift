@@ -70,7 +70,7 @@ import CefKit
     /// delivered frame frames the page identically (no zoom steps in the cast).
     static func fullscreenTransitionFrames(_ engine: ChromiumTabEngine) async throws -> (seamless: Bool, detail: String) {
         guard let window = engine.host.window else { return (false, "no window") }
-        ShareConsent.automaticAnswer = "monitor"
+        ShareConsent.automaticAnswer = ShareChoice(display: nil, surface: "monitor")
         defer { ShareConsent.automaticAnswer = nil }
         _ = try await engine.evaluate("(() => { const m = document.createElement('div'); m.id = '__oasisCorner'; m.style.cssText = 'position:fixed;right:0;bottom:0;width:200px;height:200px;background:rgb(255,0,0);z-index:2147483647'; document.documentElement.append(m); const a = document.createElement('div'); a.id = '__oasisSpin'; a.style.cssText = 'position:fixed;left:40%;top:40%;width:60px;height:60px;background:rgb(0,0,255)'; document.documentElement.append(a); let t = 0; (function tick() { if (!a.isConnected) return; a.style.transform = 'rotate(' + (t += 7) + 'deg)'; requestAnimationFrame(tick); })(); return 0; })()")
         defer { engine.execute("document.getElementById('__oasisCorner')?.remove(); document.getElementById('__oasisSpin')?.remove()") }
@@ -124,6 +124,7 @@ import CefKit
         for _ in 0..<2 {
             window.toggleFullScreen(nil)
             try await Task.sleep(for: .milliseconds(2500))
+            if window.styleMask.contains(.fullScreen) { titlebarButtonsInFullscreen = titlebarButtonsReady(window) }
         }
         poller.cancel()
         _ = await poller.value
@@ -134,6 +135,43 @@ import CefKit
             try? trace.joined(separator: "\n").write(toFile: path + ".trace.txt", atomically: true, encoding: .utf8)
         }
         return (frames >= 3 && bad.isEmpty && !fullscreen, "frames=\(frames) bad=\(bad.count) \(bad.prefix(3))")
+    }
+
+    /// In fullscreen, the system title bar (shown at the top edge) needs its
+    /// close, minimize and exit-fullscreen buttons in their normal places.
+    static var titlebarButtonsInFullscreen: String?
+    static func titlebarButtonsReady(_ window: NSWindow) -> String {
+        let buttons = [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton].map { window.standardWindowButton($0) }
+        let states = buttons.map { button -> String in
+            guard let button else { return "missing" }
+            let offset = button.layer?.transform.m41 ?? 0
+            return button.isHidden || button.alphaValue < 0.9 || abs(offset) > 0.5 || button.frame.minX < 0 ? "bad(\(button.isHidden),\(button.alphaValue),\(offset),\(button.frame.minX))" : "ok"
+        }
+        return states.joined(separator: ",")
+    }
+
+    /// Shares the main display through the page bridge and checks real frames arrive.
+    static func entireScreenShare(_ engine: ChromiumTabEngine) async -> (ok: Bool, detail: String) {
+        guard let display = DisplayCapture.displays.first else { return (false, "no display") }
+        ShareConsent.automaticAnswer = ShareChoice(display: display.id, surface: "monitor")
+        defer { ShareConsent.automaticAnswer = nil; engine.sharing.stop() }
+        do {
+            guard let begin = try await engine.sharing.receive(["action": "begin"], enabled: true) as? [String: Any],
+                  let token = begin["token"] as? String, let width = begin["width"] as? Int, let height = begin["height"] as? Int else {
+                return (false, "no begin reply")
+            }
+            var frames = 0, size = ""
+            for _ in 0..<40 {
+                if let result = try await engine.sharing.receive(["action": "frame", "token": token], enabled: true) as? [String: Any],
+                   let image = result["image"] as? String, let comma = image.firstIndex(of: ","),
+                   let data = Data(base64Encoded: String(image[image.index(after: comma)...])), let bitmap = NSBitmapImageRep(data: data) {
+                    frames += 1
+                    size = "\(bitmap.pixelsWide)x\(bitmap.pixelsHigh)"
+                }
+                try await Task.sleep(for: .milliseconds(100))
+            }
+            return (frames >= 3 && size == "\(width)x\(height)", "frames=\(frames) size=\(size) announced=\(width)x\(height) preflight=\(CGPreflightScreenCaptureAccess())")
+        } catch { return (false, "\(error.localizedDescription) preflight=\(CGPreflightScreenCaptureAccess())") }
     }
 
     static func run(session: BrowserSession) async {
@@ -249,6 +287,11 @@ import CefKit
             let transition = try await fullscreenTransitionFrames(engine)
             checks["fullscreenTransitionSeamless"] = transition.seamless
             diagnostics["transition"] = transition.detail
+            diagnostics["titlebarButtons"] = titlebarButtonsInFullscreen ?? "not measured"
+            checks["fullscreenTitlebarButtons"] = titlebarButtonsInFullscreen == "ok,ok,ok"
+            let screen = await entireScreenShare(engine)
+            checks["entireScreenShare"] = screen.ok
+            diagnostics["entireScreen"] = screen.detail
             let before = try await browser.devTools("Page.captureScreenshot", params: ["format": "png", "fromSurface": true])
             checks["pageCapture"] = (before["data"] as? String).flatMap { Data(base64Encoded: $0) } != nil
 
@@ -294,7 +337,7 @@ import CefKit
             } catch { checks["sharingDisabledWithoutSpoof"] = true }
         } catch { detail = error.localizedDescription }
         engine.setSpoof(originalSpoof, settings: originalSettings); await engine.waitForConfiguration()
-        let passed = checks.count >= 18 && checks.values.allSatisfy { $0 } && detail.isEmpty
+        let passed = checks.count >= 20 && checks.values.allSatisfy { $0 } && detail.isEmpty
         let report: [String: Any] = ["passed": passed, "checks": checks, "error": detail, "diagnostics": diagnostics]
         let output = ProcessInfo.processInfo.environment["OASIS_CHROMIUM_CHECKS_OUTPUT"].map { URL(fileURLWithPath: $0) }
             ?? FileManager.default.temporaryDirectory.appendingPathComponent("oasis-chromium-checks.json")

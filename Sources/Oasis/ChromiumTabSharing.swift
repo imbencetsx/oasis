@@ -45,6 +45,8 @@ import CefKit
     private var activity: NSObjectProtocol?
     private var lastInsideScreenPoint: CGPoint?
     private var wasAway = false
+    /// Set while an entire display (not this tab) is shared.
+    private var displayCapture: DisplayCapture?
     var isSharing: Bool { token != nil }
 
     init(engine: ChromiumTabEngine) { self.engine = engine }
@@ -52,6 +54,8 @@ import CefKit
     func stop() {
         generation = UUID()
         let oldToken = token
+        let sharedTab = displayCapture == nil
+        displayCapture?.stop(); displayCapture = nil
         token = nil; framing = nil; cursor = nil
         latestFrame = nil; frameSequence = 0; deliveredSequence = -1
         cursorImage = nil; cursorURL = nil; parkedPoint = nil
@@ -68,8 +72,10 @@ import CefKit
         let previousCleanup = cleanupTask
         cleanupTask = Task {
             await previousCleanup?.value
-            _ = try? await engine.browser?.devTools("Page.stopScreencast")
-            await engine.endCaptureViewport()
+            if sharedTab {
+                _ = try? await engine.browser?.devTools("Page.stopScreencast")
+                await engine.endCaptureViewport()
+            }
             await engine.refreshFocusEmulation()
         }
     }
@@ -89,9 +95,13 @@ import CefKit
             let requestGeneration = generation
             await cleanupTask?.value
             guard requestGeneration == generation else { throw failure("Tab sharing was cancelled.") }
-            let chosen = await ShareConsent.ask(host: browser.url?.host ?? "this website", window: window, reportAs: true)
-            guard let chosen, requestGeneration == generation else { throw failure("Tab sharing was not allowed.") }
-            surface = chosen
+            let host = browser.url?.host ?? "this website"
+            let choice = await ShareConsent.ask(host: host, window: window, reportAs: true, offersScreens: true)
+            guard let choice, requestGeneration == generation else { throw failure("Sharing was not allowed.") }
+            surface = choice.surface
+            if let display = choice.display {
+                return try await beginDisplayShare(display, host: host, generation: requestGeneration)
+            }
             initialSize = try await engine.beginCaptureViewport()
             guard requestGeneration == generation else {
                 await engine.endCaptureViewport()
@@ -128,20 +138,21 @@ import CefKit
                 stop()
                 throw error
             }
-            activity = ProcessInfo.processInfo.beginActivity(options: .userInitiatedAllowingIdleSystemSleep, reason: "Sharing an Oasis tab")
-            let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-            item.button?.title = "Sharing"
-            let menu = NSMenu()
-            let heading = NSMenuItem(title: "Sharing tab with \(browser.url?.host ?? "website")", action: nil, keyEquivalent: "")
-            heading.isEnabled = false; menu.addItem(heading)
-            let stopItem = NSMenuItem(title: "Stop Sharing", action: #selector(SharingMenuTarget.stopSharing), keyEquivalent: "")
-            stopItem.target = menuTarget; menu.addItem(stopItem); item.menu = menu
-            statusItem = item
+            showSharingStatus("Sharing tab with \(host)")
             observeFullscreenTransitions()
             return ["token": token!, "width": framing.width, "height": framing.height, "surface": surface]
         }
         guard let token, body["token"] == token else { return ["ended": true] }
         if action == "end" { stop(); return true }
+        if action == "frame", let displayCapture {
+            let current = displayCapture.current
+            if current.failure != nil { stop(); return ["ended": true] }
+            guard let frame = current.frame else { return ["retry": true] }
+            if deliveredSequence == current.sequence { return ["same": true, "cursor": NSNull()] }
+            deliveredSequence = current.sequence
+            // ScreenCaptureKit already draws the real pointer into the frame.
+            return ["image": frame, "crop": [1.0, 1.0], "cursor": NSNull()]
+        }
         guard action == "frame", let framing, let latestFrame else { return ["retry": true] }
         // Keep the originating renderer attached and painting after tab switches.
         try await engine.prepareCaptureSurface()
@@ -298,6 +309,43 @@ import CefKit
         }
         // Immediately acknowledge the screencast frame so Chromium never throttles or stalls.
         browser.sendDevToolsMessage("Page.screencastFrameAck", params: ["sessionId": sessionID])
+    }
+
+    private func beginDisplayShare(_ display: CGDirectDisplayID, host: String, generation requestGeneration: UUID) async throws -> Any {
+        let capture: DisplayCapture
+        do { capture = try await DisplayCapture.start(displayID: display) }
+        catch { throw failure(error.localizedDescription) }
+        guard requestGeneration == generation, token == nil else {
+            capture.stop()
+            throw failure("Sharing was cancelled.")
+        }
+        displayCapture = capture
+        latestFrame = nil; frameSequence = 0; deliveredSequence = -1
+        token = UUID().uuidString
+        await engine?.refreshFocusEmulation()
+        // The bridge needs a first frame before it can return a MediaStream.
+        for _ in 0..<300 {
+            if capture.current.frame != nil || requestGeneration != generation { break }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        guard capture.current.frame != nil, requestGeneration == generation, let token else {
+            stop()
+            throw failure(capture.current.failure ?? "The screen did not produce a frame.")
+        }
+        showSharingStatus("Sharing screen with \(host)")
+        return ["token": token, "width": Int(capture.size.width), "height": Int(capture.size.height), "surface": surface]
+    }
+
+    private func showSharingStatus(_ title: String) {
+        activity = ProcessInfo.processInfo.beginActivity(options: .userInitiatedAllowingIdleSystemSleep, reason: "Sharing from Oasis")
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        item.button?.title = "Sharing"
+        let menu = NSMenu()
+        let heading = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        heading.isEnabled = false; menu.addItem(heading)
+        let stopItem = NSMenuItem(title: "Stop Sharing", action: #selector(SharingMenuTarget.stopSharing), keyEquivalent: "")
+        stopItem.target = menuTarget; menu.addItem(stopItem); item.menu = menu
+        statusItem = item
     }
 
     /// The pointer drawn into the shared stream, in page CSS pixels.
