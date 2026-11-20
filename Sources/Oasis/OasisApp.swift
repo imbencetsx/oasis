@@ -10,9 +10,14 @@ import CefSwiftUI
         NSWindow.allowsAutomaticWindowTabbing = false
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
+        FullscreenTransitions.install()
         #if DEBUG
         ChromiumIntegrationChecks.runFromEnvironmentIfRequested()
         #endif
+    }
+    /// Also reached when CefKit has to exit without the normal termination reply.
+    func applicationWillTerminate(_ notification: Notification) {
+        BrowserLibrary.shared.flush()
     }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         AppLifecycle.isTerminating = true

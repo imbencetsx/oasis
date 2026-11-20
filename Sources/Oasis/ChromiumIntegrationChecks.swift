@@ -24,7 +24,15 @@ import CefKit
             }
             try? await Task.sleep(for: .milliseconds(500))
             // OASIS_QUIT_TEST only opens the page and quits, to check a clean shutdown.
-            if environment["OASIS_QUIT_TEST"] == nil { await run(session: session) }
+            if environment["OASIS_CHECK_ONLY"] == "leave", let engine = tab.chromium {
+                let host = url.host ?? ""
+                BrowserLibrary.shared.spoofSites = [SpoofSite(host: host)]
+                await engine.waitForConfiguration()
+                try? await Task.sleep(for: .milliseconds(2500))
+                let result: (ok: Bool, detail: String) = (try? await fullscreenLeaveAndReturn(engine)) ?? (false, "error")
+                let output = environment["OASIS_CHROMIUM_CHECKS_OUTPUT"] ?? NSTemporaryDirectory() + "oasis-leave.txt"
+                try? "\(result.ok) \(result.detail)".write(toFile: output, atomically: true, encoding: .utf8)
+            } else if environment["OASIS_QUIT_TEST"] == nil { await run(session: session) }
             FileHandle.standardError.write(Data("Oasis checks: quitting (tab loaded: \(tab.url?.absoluteString ?? "nil"))\n".utf8))
             NSApp.terminate(nil)
         }
@@ -223,6 +231,74 @@ import CefKit
         diagnostics["perSite"] = "on=\(on) other=\(other) back=\(back) fresh=\(freshState) off=\(off)"
     }
 
+    /// The website enters HTML fullscreen during a tab share; the user leaves for
+    /// another app and returns. The shared pointer must be parked while away and
+    /// the real pointer must return to where the stream last showed it.
+    static func fullscreenLeaveAndReturn(_ engine: ChromiumTabEngine) async throws -> (ok: Bool, detail: String) {
+        guard let browser = engine.browser, let window = engine.host.window else { return (false, "no window") }
+        ShareConsent.automaticAnswer = ShareChoice(display: nil, surface: "monitor")
+        defer { ShareConsent.automaticAnswer = nil }
+        // Start the share the way a website does; only the page's own stream loop polls frames.
+        let started = try await browser.devTools("Runtime.evaluate", params: [
+            "expression": "navigator.mediaDevices.getDisplayMedia({video: true}).then(s => { window.__share = s; return 1 }, e => String(e))",
+            "userGesture": true, "awaitPromise": true, "returnByValue": true])
+        guard engine.sharing.isSharing else { return (false, "share did not begin: \(started)") }
+        defer { engine.sharing.stop() }
+        _ = try await browser.devTools("Runtime.evaluate", params: [
+            "expression": "document.documentElement.requestFullscreen().then(() => 1, () => 0)", "userGesture": true, "awaitPromise": true])
+        let primaryTop = NSScreen.screens.first!.frame.maxY
+        func warp(_ point: CGPoint) { CGWarpMouseCursorPosition(CGPoint(x: point.x, y: primaryTop - point.y)) }
+        let statsBeforeFullscreen = engine.sharing.cursorStats
+        try await Task.sleep(for: .milliseconds(3500))
+        let afterFullscreen = engine.sharing.cursorStats
+        let fullscreen = window.styleMask.contains(.fullScreen)
+        let metrics = (try? await engine.evaluate("JSON.stringify({iw: innerWidth, ih: innerHeight, sw: screen.width, dpr: devicePixelRatio, fs: document.fullscreenElement?.tagName, vv: visualViewport.width + 'x' + visualViewport.height, vs: visualViewport.scale})") as? String) ?? "nil"
+        let shot = NSTemporaryDirectory() + "oasis-fullscreen.png"
+        let capture = Process(); capture.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture"); capture.arguments = ["-x", shot]
+        try? capture.run(); capture.waitUntilExit()
+        let layout = "view=\(browser.nativeView?.frame ?? .zero) host=\(engine.host.frame) pageBounds=\(engine.host.pageBounds) window=\(window.frame) crop=\(engine.captureCrop)"
+        let screen = window.screen ?? NSScreen.main!
+        let inside = CGPoint(x: screen.frame.midX + 200, y: screen.frame.midY - 100)
+        warp(inside)
+        try await Task.sleep(for: .milliseconds(1200))
+        let before = engine.sharing.cursorStats
+        NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.finder").first?.activate()
+        try await Task.sleep(for: .milliseconds(3500))
+        let away = engine.sharing.cursorStats
+        NSApp.activate(ignoringOtherApps: true); window.makeKeyAndOrderFront(nil)
+        try await Task.sleep(for: .milliseconds(2500))
+        let back = engine.sharing.cursorStats
+        let mouse = NSEvent.mouseLocation
+        let target = back.parkedScreen ?? .zero
+        let landed = hypot(mouse.x - target.x, mouse.y - target.y) < 4
+        // Something covering the page (the Dock, menu bar or another window) counts as leaving it.
+        let panel = NSPanel(contentRect: NSRect(x: screen.frame.midX - 150, y: screen.frame.midY - 100, width: 300, height: 200),
+                            styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        panel.level = .statusBar; panel.backgroundColor = .systemRed; panel.orderFrontRegardless()
+        let beforeCover = engine.sharing.cursorStats
+        warp(CGPoint(x: screen.frame.midX, y: screen.frame.midY))
+        try await Task.sleep(for: .milliseconds(1200))
+        let covered = engine.sharing.cursorStats
+        panel.close()
+        warp(CGPoint(x: screen.frame.midX - 400, y: screen.frame.midY - 200))
+        try await Task.sleep(for: .milliseconds(1200))
+        let uncovered = engine.sharing.cursorStats
+        let coverOK = covered.parks > beforeCover.parks && uncovered.warps > covered.warps
+
+        // The website leaves HTML fullscreen; that must not move the pointer either.
+        let beforeExit = engine.sharing.cursorStats
+        let pointerBeforeExit = NSEvent.mouseLocation
+        _ = try? await engine.evaluate("document.exitFullscreen().then(() => 1, () => 0)")
+        try await Task.sleep(for: .milliseconds(3500))
+        if window.styleMask.contains(.fullScreen) { window.toggleFullScreen(nil); try await Task.sleep(for: .milliseconds(2500)) }
+        let afterExit = engine.sharing.cursorStats
+        let exitMoved = NSEvent.mouseLocation != pointerBeforeExit
+        let quietTransitions = afterFullscreen.parks == statsBeforeFullscreen.parks && afterFullscreen.warps == statsBeforeFullscreen.warps &&
+            afterExit.warps == beforeExit.warps && !exitMoved
+        let detail = "coverOK=\(coverOK) quietTransitions=\(quietTransitions) exit parks=\(afterExit.parks - beforeExit.parks) warps=\(afterExit.warps - beforeExit.warps) moved=\(exitMoved) | enterFullscreen parks=\(afterFullscreen.parks - statsBeforeFullscreen.parks) warps=\(afterFullscreen.warps - statsBeforeFullscreen.warps) metrics=\(metrics) \(layout) shot=\(shot) | fullscreen=\(fullscreen) updatesBefore=\(before.updates) updatesAway=\(away.updates - before.updates) parks=\(away.parks - before.parks) warps=\(back.warps - away.warps) mouse=\(mouse) parked=\(target) active=\(NSApp.isActive)"
+        return (fullscreen && away.parks > before.parks && back.warps > away.warps && landed && quietTransitions && coverOK, detail)
+    }
+
     static func run(session: BrowserSession) async {
         guard let tab = session.selectedTab, let engine = tab.chromium, let browser = engine.browser else { return }
         var checks: [String: Bool] = [:]
@@ -342,6 +418,9 @@ import CefKit
             diagnostics["transition"] = transition.detail
             diagnostics["titlebarButtons"] = titlebarButtonsInFullscreen ?? "not measured"
             checks["fullscreenTitlebarButtons"] = titlebarButtonsInFullscreen == "ok,ok,ok"
+            let leave = try await fullscreenLeaveAndReturn(engine)
+            checks["fullscreenLeaveAndReturn"] = leave.ok
+            diagnostics["leaveAndReturn"] = leave.detail
             let screen = await entireScreenShare(engine)
             checks["entireScreenShare"] = screen.ok
             diagnostics["entireScreen"] = screen.detail
@@ -391,7 +470,7 @@ import CefKit
             await perSiteChecks(session: session, tab: tab, checks: &checks, diagnostics: &diagnostics)
         } catch { detail = error.localizedDescription }
         engine.setSpoof(originalSpoof, settings: originalSettings); await engine.waitForConfiguration()
-        let passed = checks.count >= 24 && checks.values.allSatisfy { $0 } && detail.isEmpty
+        let passed = checks.count >= 25 && checks.values.allSatisfy { $0 } && detail.isEmpty
         let report: [String: Any] = ["passed": passed, "checks": checks, "error": detail, "diagnostics": diagnostics]
         let output = ProcessInfo.processInfo.environment["OASIS_CHROMIUM_CHECKS_OUTPUT"].map { URL(fileURLWithPath: $0) }
             ?? FileManager.default.temporaryDirectory.appendingPathComponent("oasis-chromium-checks.json")

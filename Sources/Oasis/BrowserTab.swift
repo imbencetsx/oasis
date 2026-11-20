@@ -77,7 +77,8 @@ final class BrowserTab: NSObject, Identifiable, WKNavigationDelegate, WKUIDelega
     private var cursorHandledBySharing: Bool { chromium?.sharing.isSharing == true }
 
     func restoreCursorIfReturning() {
-        guard !cursorHandledBySharing, ScreenRecordingDetector.isRecordingActive(for: self),
+        guard !cursorHandledBySharing, !FullscreenTransitions.isSettling(renderView.window),
+              ScreenRecordingDetector.isRecordingActive(for: self),
               let session, session.selectedID == id,
               !session.showsNewTabSearch, !showsReader,
               NSApp.isActive, let window = renderView.window,
@@ -92,6 +93,7 @@ final class BrowserTab: NSObject, Identifiable, WKNavigationDelegate, WKUIDelega
     }
 
     func updateCursorTracking() {
+        guard !FullscreenTransitions.isSettling(renderView.window) else { return }
         guard !cursorHandledBySharing, ScreenRecordingDetector.isRecordingActive(for: self) else {
             wasAway = false
             lastInsideScreenPoint = nil

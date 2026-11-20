@@ -354,12 +354,24 @@ import CefKit
     /// Distance from the edge where the pointer is parked (~1 cm at 96 CSS DPI), as in Prism.
     private static let parkingMargin: CGFloat = 38
 
+    #if DEBUG
+    /// Counters for the automated checks.
+    struct CursorStats { var updates = 0, parks = 0, warps = 0; var lastWarp: CGPoint?; var parkedScreen: CGPoint? }
+    var cursorStats = CursorStats()
+    #endif
+
     private func updateCursor(_ host: ChromiumPageHost) {
+        #if DEBUG
+        cursorStats.updates += 1
+        #endif
         guard let engine, ScreenRecordingDetector.isRecordingActive(for: engine.tab) else {
             wasAway = false
             lastInsideScreenPoint = nil
             return
         }
+        // Entering or leaving fullscreen (including a website's HTML fullscreen)
+        // moves the window between Spaces; that is not the user leaving the page.
+        if FullscreenTransitions.isSettling(host.window) || FullscreenTransitions.isSettling(engine.tab?.session?.window) { return }
         let containment = engine.spoofSettings.screenshareCursor
         let frame = engine.pageFrame(in: host.pageBounds)
         guard frame.width >= 1, initialSize.width >= 1 else { return }
@@ -371,9 +383,13 @@ import CefKit
         if let tab = engine.tab, tab.session?.selectedID == tab.id,
            tab.session?.showsNewTabSearch != true, !tab.showsReader, let window = visibleWindow,
            window.isVisible, window.isOnActiveSpace, !window.isMiniaturized, !host.isHiddenOrHasHiddenAncestor {
-            let point = host.convert(window.convertPoint(fromScreen: NSEvent.mouseLocation), from: nil)
+            let mouseLocation = NSEvent.mouseLocation
+            let point = host.convert(window.convertPoint(fromScreen: mouseLocation), from: nil)
+            // The Dock, the menu bar, the fullscreen title bar and other windows can
+            // cover the page (especially in fullscreen); the pointer is then not on it.
+            let topmost = NSWindow.windowNumber(at: mouseLocation, belowWindowWithWindowNumber: 0)
             exitPoint = CGPoint(x: (point.x - frame.minX) * cssPerPoint, y: (point.y - frame.minY) * cssPerPoint)
-            if NSApp.isActive, window.isKeyWindow, window.attachedSheet == nil,
+            if NSApp.isActive, window.isKeyWindow, window.attachedSheet == nil, topmost == window.windowNumber,
                frame.contains(point), host.visibleRect.contains(point), let root = window.contentView {
                 let rootPoint = root.superview?.convert(point, from: host) ?? host.convert(point, to: nil)
                 if let hit = root.hitTest(rootPoint), hit === host || hit.isDescendant(of: host) { inside = true }
@@ -391,6 +407,9 @@ import CefKit
             parkedPoint = nil
             if let primary = NSScreen.screens.first {
                 CGWarpMouseCursorPosition(CGPoint(x: lastPoint.x, y: primary.frame.maxY - lastPoint.y))
+                #if DEBUG
+                cursorStats.warps += 1; cursorStats.lastWarp = lastPoint
+                #endif
             }
             return
         }
@@ -413,6 +432,10 @@ import CefKit
     /// stream never shows it leaving the page. The page's own pointer position
     /// (and :hover) moves there too.
     private func park(exit: CGPoint?, frame: CGRect, cssPerPoint: CGFloat, window: NSWindow?, host: ChromiumPageHost) {
+        #if DEBUG
+        cursorStats.parks += 1
+        defer { cursorStats.parkedScreen = lastInsideScreenPoint }
+        #endif
         let width = frame.width * cssPerPoint, height = frame.height * cssPerPoint
         let margin = min(Self.parkingMargin, width / 2, height / 2)
         let last = cursor?.position ?? CGPoint(x: width / 2, y: height / 2)
