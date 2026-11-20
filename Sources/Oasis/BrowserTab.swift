@@ -341,7 +341,7 @@ final class BrowserTab: NSObject, Identifiable, WKNavigationDelegate, WKUIDelega
         }
     }
 
-    private func evaluatePage(_ script: String, completion: @escaping (Any?, Error?) -> Void) {
+    private func evaluatePage(_ script: String, completion: @escaping @MainActor @Sendable (Any?, Error?) -> Void) {
         if let chromium {
             Task { do { completion(try await chromium.evaluate(script), nil) } catch { completion(nil, error) } }
         } else { webView.evaluateJavaScript(script, completionHandler: completion) }
