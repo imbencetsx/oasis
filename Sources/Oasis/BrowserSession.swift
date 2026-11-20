@@ -96,7 +96,8 @@ final class BrowserSession: Identifiable {
   {
     let tab = BrowserTab(
       isPrivate: isPrivate, configuration: configuration, dataStore: privateStore,
-      spoofModeEnabled: library.spoofModeEnabled, chromiumProfile: chromiumProfile)
+      spoofModeEnabled: library.spoofModeEnabled, spoofSettings: library.spoofSettings,
+      chromiumProfile: chromiumProfile)
     let target = spaceID.flatMap { id in spaces.contains { $0.id == id } ? id : nil } ?? currentSpaceID
     tab.session = self
     tab.spaceID = target

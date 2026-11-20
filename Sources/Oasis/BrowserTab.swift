@@ -55,6 +55,7 @@ final class BrowserTab: NSObject, Identifiable, WKNavigationDelegate, WKUIDelega
     @ObservationIgnored private var faviconTask: Task<Void, Never>?
     @ObservationIgnored private var observations: [NSKeyValueObservation] = []
     @ObservationIgnored private var spoofModeEnabled: Bool
+    @ObservationIgnored private(set) var spoofSettings: SpoofSettings
     @ObservationIgnored private let spoofFrames: SpoofFrameCoverage
     @ObservationIgnored private let windowSharing = WindowScreenSharing()
     @ObservationIgnored private var lastInsideScreenPoint: CGPoint?
@@ -65,8 +66,11 @@ final class BrowserTab: NSObject, Identifiable, WKNavigationDelegate, WKUIDelega
         return windowSharing.isSharing
     }
 
+    /// A shared Chromium tab places its pointer itself (Spoof Mode cursor containment).
+    private var cursorHandledBySharing: Bool { chromium?.sharing.isSharing == true }
+
     func restoreCursorIfReturning() {
-        guard ScreenRecordingDetector.isRecordingActive(for: self),
+        guard !cursorHandledBySharing, ScreenRecordingDetector.isRecordingActive(for: self),
               let session, session.selectedID == id,
               !session.showsNewTabSearch, !showsReader,
               NSApp.isActive, let window = renderView.window,
@@ -81,7 +85,7 @@ final class BrowserTab: NSObject, Identifiable, WKNavigationDelegate, WKUIDelega
     }
 
     func updateCursorTracking() {
-        guard ScreenRecordingDetector.isRecordingActive(for: self) else {
+        guard !cursorHandledBySharing, ScreenRecordingDetector.isRecordingActive(for: self) else {
             wasAway = false
             lastInsideScreenPoint = nil
             return
@@ -119,9 +123,11 @@ final class BrowserTab: NSObject, Identifiable, WKNavigationDelegate, WKUIDelega
         lastInsideScreenPoint = mouseLocation
     }
 
-    init(isPrivate: Bool, configuration: WKWebViewConfiguration? = nil, dataStore: WKWebsiteDataStore? = nil, spoofModeEnabled: Bool = false, chromiumProfile: CefProfile? = nil) {
+    init(isPrivate: Bool, configuration: WKWebViewConfiguration? = nil, dataStore: WKWebsiteDataStore? = nil, spoofModeEnabled: Bool = false,
+         spoofSettings: SpoofSettings = SpoofSettings(), chromiumProfile: CefProfile? = nil) {
         self.isPrivate = isPrivate
         self.spoofModeEnabled = spoofModeEnabled
+        self.spoofSettings = spoofSettings
         let coverage = SpoofFrameCoverage()
         spoofFrames = coverage
         let config = configuration ?? WKWebViewConfiguration()
@@ -131,19 +137,19 @@ final class BrowserTab: NSObject, Identifiable, WKNavigationDelegate, WKUIDelega
         self.configuration = config
         super.init()
         if CefRuntime.shared.isInitialized {
-            chromium = ChromiumTabEngine(tab: self, profile: chromiumProfile ?? (isPrivate ? .incognito() : .default), spoofEnabled: spoofModeEnabled)
+            chromium = ChromiumTabEngine(tab: self, profile: chromiumProfile ?? (isPrivate ? .incognito() : .default), spoofEnabled: spoofModeEnabled, settings: spoofSettings)
         }
     }
 
     private func makeWebView() -> WKWebView {
         spoofFrames.prepare(configuration.userContentController)
-        SpoofMode.configure(configuration.userContentController, enabled: spoofModeEnabled)
+        SpoofMode.configure(configuration.userContentController, source: webKitSpoofSource)
         let webView = WKWebView(frame: .zero, configuration: configuration)
-        webView.customUserAgent = spoofModeEnabled ? SpoofMode.userAgent : nil
-        windowSharing.attach(webView, enabled: spoofModeEnabled)
+        webView.customUserAgent = webKitUserAgent
+        windowSharing.attach(webView, enabled: spoofModeEnabled && spoofSettings.screenshare)
         contentView = webView
         webView.obscuredContentInsets = NSEdgeInsets(top: 64, left: 0, bottom: 0, right: 0)
-        spoofFrames.attach(webView, enabled: spoofModeEnabled)
+        spoofFrames.attach(webView, settings: webKitSpoofSettings)
         webView.navigationDelegate = self
         webView.uiDelegate = self
         webView.allowsBackForwardNavigationGestures = true
@@ -235,20 +241,30 @@ final class BrowserTab: NSObject, Identifiable, WKNavigationDelegate, WKUIDelega
         else { webView.load(URLRequest(url: url)) }
         session?.save()
     }
-    func setSpoofMode(_ enabled: Bool) {
+    func setSpoofMode(_ enabled: Bool) { setSpoofMode(enabled, settings: spoofSettings) }
+    func setSpoofMode(_ enabled: Bool, settings: SpoofSettings) {
+        guard enabled != spoofModeEnabled || settings != spoofSettings || chromium == nil else { return }
         spoofModeEnabled = enabled
-        if let chromium { chromium.setSpoof(enabled); return }
-        windowSharing.apply(enabled: enabled)
+        spoofSettings = settings
+        if let chromium { chromium.setSpoof(enabled, settings: settings); return }
+        windowSharing.apply(enabled: enabled && settings.screenshare)
         guard let webView = contentView else { return }
-        webView.customUserAgent = enabled ? SpoofMode.userAgent : nil
-        SpoofMode.configure(webView.configuration.userContentController, enabled: enabled)
-        spoofFrames.apply(enabled: enabled)
+        webView.customUserAgent = webKitUserAgent
+        SpoofMode.configure(webView.configuration.userContentController, source: webKitSpoofSource)
+        spoofFrames.apply(settings: webKitSpoofSettings)
         applySpoofModeToDocument()
     }
+    // WebKit cannot emulate a viewport, so its script follows the live viewport
+    // and needs no locked resolution.
+    private var webKitSpoofSettings: SpoofSettings? { spoofModeEnabled ? spoofSettings : nil }
+    private var webKitSpoofSource: String? {
+        webKitSpoofSettings.map { SpoofMode.source($0, resolution: .zero) }
+    }
+    private var webKitUserAgent: String? { spoofModeEnabled ? spoofSettings.identity?.userAgent : nil }
     private func applySpoofModeToDocument() {
         guard !isBlankPage else { return }
         // Always use the current preference; navigation failures never switch the toggle off.
-        webView.evaluateJavaScript(spoofModeEnabled ? SpoofMode.source : SpoofMode.restoreSource) { _, _ in }
+        webView.evaluateJavaScript(webKitSpoofSource ?? SpoofMode.restoreSource) { _, _ in }
     }
     func setTopInset(_ topInset: CGFloat) {
         if let chromium { chromium.host.topInset = topInset; return }
@@ -362,7 +378,7 @@ final class BrowserTab: NSObject, Identifiable, WKNavigationDelegate, WKUIDelega
 
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
         windowSharing.stop()
-        SpoofMode.configure(webView.configuration.userContentController, enabled: spoofModeEnabled)
+        SpoofMode.configure(webView.configuration.userContentController, source: webKitSpoofSource)
         errorMessage = nil; showsReader = false; readerContent = nil
         sync()
     }

@@ -3,7 +3,7 @@ import AppKit
 
 struct BrowserSettings: View {
     let library: BrowserLibrary
-    @State private var selection = SettingsSection.general
+    @AppStorage(SettingsSection.preferenceKey) private var selection = SettingsSection.general
     @AppStorage("appearance") private var appearance = "System"
 
     var body: some View {
@@ -17,6 +17,9 @@ struct BrowserSettings: View {
             Tab("Privacy", systemImage: "hand.raised", value: SettingsSection.privacy) {
                 BrowserSettingsPage(section: .privacy, library: library)
             }
+            Tab("Spoof Mode", systemImage: "theatermasks", value: SettingsSection.spoof) {
+                SpoofSettingsPage(library: library)
+            }
             Tab("Typing", systemImage: "keyboard", value: SettingsSection.typing) {
                 BrowserSettingsPage(section: .typing, library: library)
             }
@@ -29,14 +32,17 @@ struct BrowserSettings: View {
     }
 }
 
-private enum SettingsSection: Hashable {
-    case general, appearance, privacy, typing, advanced
+enum SettingsSection: String, Hashable {
+    case general, appearance, privacy, spoof, typing, advanced
+    /// Lets other views open Settings at a particular tab.
+    static let preferenceKey = "settingsSection"
 
     var contentHeight: CGFloat {
         switch self {
         case .general: 260
         case .appearance: 320
-        case .privacy: 500
+        case .privacy: 420
+        case .spoof: 640
         case .typing: 340
         case .advanced: 380
         }
@@ -63,6 +69,7 @@ private struct BrowserSettingsPage: View {
             case .appearance: appearanceSettings
             case .privacy: privacy
             case .typing: clipboardTyping
+            case .spoof: EmptyView()
             case .advanced: advanced
             }
         }
@@ -146,13 +153,8 @@ private struct BrowserSettingsPage: View {
             }
             Section {
                 Toggle("Spoof Mode", isOn: $library.spoofModeEnabled)
-                DisclosureGroup("How Spoof Mode works") {
-                    Text("Reports pages as visible and focused, and suppresses visibility, window-focus, and pointer enter/leave events. Real clicks, typing, and input-field focus still work. No artificial user activity is generated.")
-                    Text("Reload open pages for coverage from document start, including embedded frames. This is best effort: timing, network behavior, and other APIs can still reveal activity. Some hover features may behave differently.")
-                }
-                .font(.callout).foregroundStyle(.secondary)
             } header: { Text("Activity privacy") } footer: {
-                Text("Reload open pages after changing Spoof Mode.")
+                Text("Choose which protections Spoof Mode uses in the Spoof Mode tab.")
             }
             Section {
                 LabeledContent {
@@ -306,5 +308,90 @@ private struct SettingsSlider: View {
             .font(.caption).foregroundStyle(.secondary)
         }
         .padding(.vertical, 8)
+    }
+}
+
+/// Spoof Mode preferences. Each switch matches one Prism spoof feature and
+/// applies immediately to open tabs while Spoof Mode is on.
+private struct SpoofSettingsPage: View {
+    @Bindable var library: BrowserLibrary
+
+    var body: some View {
+        Form {
+            Section {
+                Toggle(isOn: $library.spoofModeEnabled) {
+                    SettingsLabel("Spoof Mode", detail: "Turn the features below on for every website.")
+                }
+            } footer: {
+                Text("Preferences take effect immediately on open tabs while Spoof Mode is on. Reload pages for coverage from the start of the document.")
+            }
+            Section("Spoof mode features") {
+                feature("Focus & document visibility",
+                        "Report active, focused, and visible document state to defeat tab-switch detection.",
+                        \.focusVisibility)
+                feature("Fullscreen lock & notification suppression",
+                        "Locks the reported resolution to your display's full-screen size, reports true fullscreen mode, and hides exit/re-enter events from websites.",
+                        \.fullscreen)
+                feature("Selective keyboard listener filtering",
+                        "Allow typing characters in textboxes while blocking shortcuts and key listeners.",
+                        \.keyboard)
+                feature("Clipboard event protection",
+                        "Hides copy, cut, and paste events from page scripts to prevent detection.",
+                        \.clipboardEvents)
+                feature("Force enable right-click context menu",
+                        "Bypasses website contextmenu blocks and preventDefault restrictions.",
+                        \.rightClick)
+                feature("Text selection protection",
+                        "Relaxes user-select:none and reports clean selection read APIs.",
+                        \.selection)
+                feature("Screenshare surface spoofing",
+                        "Intercepts screenshare displaySurface settings and labels. Choose to report a full screen or a single tab when sharing.",
+                        \.screenshare)
+                feature("Screenshare cursor containment",
+                        "Keeps the cursor inside tab-only screenshares by parking it near the edge (~1cm) when moving outside.",
+                        \.screenshareCursor)
+            }
+            Section("Identity") {
+                feature("OS & platform spoofing",
+                        "Report browser as running on the selected operating system.",
+                        \.osPlatform)
+                Picker("Spoofed Operating System", selection: $library.spoofSettings.platform) {
+                    ForEach(SpoofPlatform.allCases) { platform in
+                        Text(platform == .win64 ? "\(platform.name) (Default)" : platform.name).tag(platform)
+                    }
+                }
+                .disabled(!library.spoofSettings.osPlatform)
+                feature("Browser identity spoofing",
+                        "Report browser identity, User-Agent, and Client Hints as the selected web browser.",
+                        \.browserIdentity)
+                Picker("Spoofed Web Browser", selection: $library.spoofSettings.browser) {
+                    ForEach(SpoofBrowser.allCases) { browser in
+                        Text(browser == .chrome ? "\(browser.name) (Default)" : browser.name).tag(browser)
+                    }
+                }
+                .disabled(!library.spoofSettings.browserIdentity)
+            }
+            Section {
+                LabeledContent {
+                    Button("Restore Defaults") { library.spoofSettings = SpoofSettings() }
+                        .disabled(library.spoofSettings == SpoofSettings())
+                } label: {
+                    SettingsLabel("Defaults", detail: "Every feature on, Chrome on Windows 11.")
+                }
+            } footer: {
+                Text("These overrides are best effort. Sites can still observe other activity signals; Spoof Mode cannot guarantee that switching tabs or windows is undetectable.")
+            }
+        }
+        .formStyle(.grouped)
+    }
+
+    private func feature(_ title: LocalizedStringResource, _ detail: LocalizedStringResource,
+                         _ keyPath: WritableKeyPath<SpoofSettings, Bool>) -> some View {
+        Toggle(isOn: Binding(
+            get: { library.spoofSettings[keyPath: keyPath] },
+            set: { library.spoofSettings[keyPath: keyPath] = $0 }
+        )) {
+            SettingsLabel(title, detail: detail)
+        }
     }
 }

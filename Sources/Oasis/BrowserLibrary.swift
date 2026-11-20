@@ -27,9 +27,20 @@ final class BrowserLibrary {
             guard spoofModeEnabled != oldValue else { return }
             if !spoofModeEnabled { ClipboardTyping.shared.stop() }
             UserDefaults.standard.set(spoofModeEnabled, forKey: "spoofMode")
-            for session in sessions.values {
-                for tab in session.tabs { tab.setSpoofMode(spoofModeEnabled) }
-            }
+            applySpoofMode()
+        }
+    }
+    /// Feature switches for Spoof Mode. Changes apply immediately to open tabs.
+    var spoofSettings = SpoofSettings.load() {
+        didSet {
+            guard spoofSettings != oldValue else { return }
+            spoofSettings.save()
+            applySpoofMode()
+        }
+    }
+    private func applySpoofMode() {
+        for session in sessions.values {
+            for tab in session.tabs { tab.setSpoofMode(spoofModeEnabled, settings: spoofSettings) }
         }
     }
     @ObservationIgnored private let storage: LibraryStorage

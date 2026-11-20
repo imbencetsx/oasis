@@ -7,7 +7,9 @@ import CefKit
     private var token: String?
     private var framing: WebViewCaptureFraming?
     private var initialSize = CGSize.zero
-    private var cursor: WebViewCaptureCursor?
+    private var cursor: SharedCursor?
+    private var surface = "monitor"
+    private var parkedPoint: CGPoint?
     private var latestFrame: String?
     private var frameSequence = 0
     private var deliveredSequence = -1
@@ -29,7 +31,7 @@ import CefKit
         let oldToken = token
         token = nil; framing = nil; cursor = nil
         latestFrame = nil; frameSequence = 0; deliveredSequence = -1
-        cursorImage = nil; cursorURL = nil
+        cursorImage = nil; cursorURL = nil; parkedPoint = nil
         lastInsideScreenPoint = nil; wasAway = false
         if let statusItem { NSStatusBar.system.removeStatusItem(statusItem) }
         statusItem = nil
@@ -42,7 +44,7 @@ import CefKit
             await previousCleanup?.value
             _ = try? await engine.browser?.devTools("Page.stopScreencast")
             await engine.endCaptureViewport()
-            _ = try? await engine.browser?.devTools("Emulation.setFocusEmulationEnabled", params: ["enabled": false])
+            await engine.refreshFocusEmulation()
         }
     }
 
@@ -60,14 +62,9 @@ import CefKit
             let requestGeneration = generation
             await cleanupTask?.value
             guard requestGeneration == generation else { throw failure("Tab sharing was cancelled.") }
-            let alert = NSAlert()
-            alert.messageText = "Share this tab with \(browser.url?.host ?? "this website")?"
-            alert.informativeText = "Only this tab's website will be shared, without browser controls. The cursor stays at its last page position when you leave the tab. Switching tabs won't change the shared page. Stop from the Sharing menu in the macOS menu bar. Available only in Spoof Mode."
-            alert.addButton(withTitle: "Don't Allow"); alert.addButton(withTitle: "Share Tab")
-            let response = await withCheckedContinuation { continuation in
-                alert.beginSheetModal(for: window) { continuation.resume(returning: $0) }
-            }
-            guard response == .alertSecondButtonReturn, requestGeneration == generation else { throw failure("Tab sharing was not allowed.") }
+            let chosen = await ShareConsent.ask(host: browser.url?.host ?? "this website", window: window, reportAs: true)
+            guard let chosen, requestGeneration == generation else { throw failure("Tab sharing was not allowed.") }
+            surface = chosen
             initialSize = try await engine.beginCaptureViewport()
             guard requestGeneration == generation else {
                 await engine.endCaptureViewport()
@@ -78,7 +75,7 @@ import CefKit
             self.framing = framing
             latestFrame = nil; frameSequence = 0; deliveredSequence = -1
             token = UUID().uuidString
-            _ = try? await browser.devTools("Emulation.setFocusEmulationEnabled", params: ["enabled": true])
+            await engine.refreshFocusEmulation()
             do {
                 _ = try await browser.devTools("Page.startScreencast", params: [
                     "format": "jpeg", "quality": 75, "maxWidth": framing.width,
@@ -105,7 +102,7 @@ import CefKit
             let stopItem = NSMenuItem(title: "Stop Sharing", action: #selector(SharingMenuTarget.stopSharing), keyEquivalent: "")
             stopItem.target = menuTarget; menu.addItem(stopItem); item.menu = menu
             statusItem = item
-            return ["token": token!, "width": framing.width, "height": framing.height]
+            return ["token": token!, "width": framing.width, "height": framing.height, "surface": surface]
         }
         guard let token, body["token"] == token else { return ["ended": true] }
         if action == "end" { stop(); return true }
@@ -127,6 +124,8 @@ import CefKit
                 "x": (cursor.position.x - cursor.hotSpot.x) * scale,
                 "y": (cursor.position.y - cursor.hotSpot.y) * scale,
                 "width": cursor.size.width * scale, "height": cursor.size.height * scale]
+        } else {
+            result["cursor"] = NSNull()
         }
         return result
     }
@@ -142,57 +141,55 @@ import CefKit
         browser.sendDevToolsMessage("Page.screencastFrameAck", params: ["sessionId": sessionID])
     }
 
-    func restoreCursorIfReturning() {
-        guard ScreenRecordingDetector.isRecordingActive(for: engine?.tab),
-              let tab = engine?.tab, tab.session?.selectedID == tab.id,
-              tab.session?.showsNewTabSearch != true, !tab.showsReader,
-              NSApp.isActive, let host = engine?.host, let window = host.window,
-              window !== engine?.captureWindow, window.isKeyWindow, window.isVisible,
-              window.attachedSheet == nil, window.isOnActiveSpace, !window.isMiniaturized,
-              !host.isHiddenOrHasHiddenAncestor, wasAway, let lastPoint = lastInsideScreenPoint else { return }
-        wasAway = false
-        if let primary = NSScreen.screens.first {
-            let quartzPoint = CGPoint(x: lastPoint.x, y: primary.frame.maxY - lastPoint.y)
-            CGWarpMouseCursorPosition(quartzPoint)
-        }
-    }
+    /// The pointer drawn into the shared stream, in page CSS pixels.
+    private struct SharedCursor { var position: CGPoint; var hotSpot: CGPoint; var size: CGSize }
+
+    /// Distance from the edge where the pointer is parked (~1 cm at 96 CSS DPI), as in Prism.
+    private static let parkingMargin: CGFloat = 38
 
     private func updateCursor(_ host: ChromiumPageHost) {
-        guard ScreenRecordingDetector.isRecordingActive(for: engine?.tab) else {
+        guard let engine, ScreenRecordingDetector.isRecordingActive(for: engine.tab) else {
             wasAway = false
             lastInsideScreenPoint = nil
             return
         }
-        guard let tab = engine?.tab, tab.session?.selectedID == tab.id,
-              tab.session?.showsNewTabSearch != true, !tab.showsReader,
-              NSApp.isActive, let window = host.window, window !== engine?.captureWindow,
-              window.isKeyWindow, window.isVisible, window.attachedSheet == nil,
-              window.isOnActiveSpace, !window.isMiniaturized, !host.isHiddenOrHasHiddenAncestor else {
+        let containment = engine.spoofSettings.screenshareCursor
+        let frame = engine.pageFrame(in: host.pageBounds)
+        guard frame.width >= 1, initialSize.width >= 1 else { return }
+        let cssPerPoint = initialSize.width / frame.width
+        let visibleWindow = host.window.flatMap { $0 === engine.captureWindow ? nil : $0 }
+        // Where the pointer is relative to the page, when this tab is on screen.
+        var exitPoint: CGPoint?
+        var inside = false
+        if let tab = engine.tab, tab.session?.selectedID == tab.id,
+           tab.session?.showsNewTabSearch != true, !tab.showsReader, let window = visibleWindow,
+           window.isVisible, window.isOnActiveSpace, !window.isMiniaturized, !host.isHiddenOrHasHiddenAncestor {
+            let point = host.convert(window.convertPoint(fromScreen: NSEvent.mouseLocation), from: nil)
+            exitPoint = CGPoint(x: (point.x - frame.minX) * cssPerPoint, y: (point.y - frame.minY) * cssPerPoint)
+            if NSApp.isActive, window.isKeyWindow, window.attachedSheet == nil,
+               frame.contains(point), host.visibleRect.contains(point), let root = window.contentView {
+                let rootPoint = root.superview?.convert(point, from: host) ?? host.convert(point, to: nil)
+                if let hit = root.hitTest(rootPoint), hit === host || hit.isDescendant(of: host) { inside = true }
+            }
+        }
+        guard inside, let exitPoint else {
+            if !wasAway, containment { park(exit: exitPoint, frame: frame, cssPerPoint: cssPerPoint, window: visibleWindow, host: host) }
             wasAway = true
+            if !containment { cursor = nil }
             return
         }
-        let mouseLocation = NSEvent.mouseLocation
-        let point = host.convert(window.convertPoint(fromScreen: mouseLocation), from: nil)
-        guard host.pageBounds.contains(point), host.visibleRect.contains(point),
-              let root = window.contentView else {
-            wasAway = true
-            return
-        }
-        let rootPoint = root.superview?.convert(point, from: host) ?? host.convert(point, to: nil)
-        guard let hit = root.hitTest(rootPoint), hit === host || hit.isDescendant(of: host) else {
-            wasAway = true
-            return
-        }
-        if wasAway, let lastPoint = lastInsideScreenPoint {
+        if wasAway, containment, let lastPoint = lastInsideScreenPoint {
+            // Returning: continue from where the stream last showed the pointer.
             wasAway = false
+            parkedPoint = nil
             if let primary = NSScreen.screens.first {
-                let quartzPoint = CGPoint(x: lastPoint.x, y: primary.frame.maxY - lastPoint.y)
-                CGWarpMouseCursorPosition(quartzPoint)
+                CGWarpMouseCursorPosition(CGPoint(x: lastPoint.x, y: primary.frame.maxY - lastPoint.y))
             }
             return
         }
         wasAway = false
-        lastInsideScreenPoint = mouseLocation
+        parkedPoint = nil
+        lastInsideScreenPoint = NSEvent.mouseLocation
         let current = NSCursor.current
         if cursorImage !== current.image,
            let tiff = current.image.tiffRepresentation,
@@ -200,9 +197,59 @@ import CefKit
             cursorImage = current.image
             cursorURL = "data:image/png;base64," + png.base64EncodedString()
         }
-        guard let image = current.image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return }
-        cursor = WebViewCaptureCursor(image: image,
-            position: CGPoint(x: point.x, y: point.y - host.topInset), hotSpot: current.hotSpot, size: current.image.size)
+        cursor = SharedCursor(position: exitPoint,
+            hotSpot: CGPoint(x: current.hotSpot.x * cssPerPoint, y: current.hotSpot.y * cssPerPoint),
+            size: CGSize(width: current.image.size.width * cssPerPoint, height: current.image.size.height * cssPerPoint))
+    }
+
+    /// Parks the shared pointer ~1 cm inside the edge it left through, so the
+    /// stream never shows it leaving the page. The page's own pointer position
+    /// (and :hover) moves there too.
+    private func park(exit: CGPoint?, frame: CGRect, cssPerPoint: CGFloat, window: NSWindow?, host: ChromiumPageHost) {
+        let width = frame.width * cssPerPoint, height = frame.height * cssPerPoint
+        let margin = min(Self.parkingMargin, width / 2, height / 2)
+        let last = cursor?.position ?? CGPoint(x: width / 2, y: height / 2)
+        var edge = ""
+        var origin = last
+        if let exit {
+            let overshoot = [("left", -exit.x), ("right", exit.x - width), ("top", -exit.y), ("bottom", exit.y - height)]
+                .max { $0.1 < $1.1 }!
+            if overshoot.1 >= 0 { edge = overshoot.0; origin = exit }
+        }
+        let x = min(max(origin.x, 0), width), y = min(max(origin.y, 0), height)
+        if edge.isEmpty {
+            let distances = [("left", x), ("right", width - x), ("top", y), ("bottom", height - y)]
+            edge = distances.min { $0.1 < $1.1 }!.0
+        }
+        let clampedX = min(max(x, margin), width - margin), clampedY = min(max(y, margin), height - margin)
+        let parked: CGPoint
+        switch edge {
+        case "left": parked = CGPoint(x: margin, y: clampedY)
+        case "right": parked = CGPoint(x: width - margin, y: clampedY)
+        case "top": parked = CGPoint(x: clampedX, y: margin)
+        default: parked = CGPoint(x: clampedX, y: height - margin)
+        }
+        parkedPoint = parked
+        if cursor != nil { cursor?.position = parked }
+        else {
+            let image = cursorImage ?? NSCursor.arrow.image
+            if cursorURL == nil, let tiff = image.tiffRepresentation,
+               let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) {
+                cursorImage = image
+                cursorURL = "data:image/png;base64," + png.base64EncodedString()
+            }
+            let hot = NSCursor.arrow.hotSpot
+            cursor = SharedCursor(position: parked, hotSpot: CGPoint(x: hot.x * cssPerPoint, y: hot.y * cssPerPoint),
+                size: CGSize(width: image.size.width * cssPerPoint, height: image.size.height * cssPerPoint))
+        }
+        // Returning to the tab continues from the parked point.
+        if let window {
+            let local = CGPoint(x: frame.minX + parked.x / cssPerPoint, y: frame.minY + parked.y / cssPerPoint)
+            lastInsideScreenPoint = window.convertPoint(toScreen: host.convert(local, to: nil))
+        }
+        engine?.browser?.sendDevToolsMessage("Input.dispatchMouseEvent", params: [
+            "type": "mouseMoved", "x": Double(parked.x), "y": Double(parked.y), "button": "none"
+        ])
     }
 
     private lazy var menuTarget = SharingMenuTarget { [weak self] in self?.stop() }

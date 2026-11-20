@@ -24,11 +24,15 @@ import CCef
         // CEF's C-to-C++ wrapper consumes the reference passed to registration.
     }
 
-    func send(_ method: String, params: [String: Any]) async throws -> Data {
+    /// - Parameter sessionID: a flattened child-target session (for example an
+    ///   out-of-process iframe), or nil for the page itself.
+    func send(_ method: String, params: [String: Any], sessionID: String? = nil) async throws -> Data {
         guard registration != nil, let browser else { throw failure("Chromium page is closed.") }
         nextID += 1
         let id = nextID
-        let data = try JSONSerialization.data(withJSONObject: ["id": id, "method": method, "params": params])
+        var message: [String: Any] = ["id": id, "method": method, "params": params]
+        if let sessionID { message["sessionId"] = sessionID }
+        let data = try JSONSerialization.data(withJSONObject: message)
         return try await withCheckedThrowingContinuation { continuation in
             pending[id] = continuation
             var accepted = false
@@ -53,7 +57,10 @@ import CCef
                 continuation.resume(throwing: failure(error["message"] as? String ?? "Chromium command failed."))
             } else { continuation.resume(returning: (try? JSONSerialization.data(withJSONObject: message["result"] as? [String: Any] ?? [:])) ?? Data("{}".utf8)) }
         } else if let method = message["method"] as? String {
-            event?(method, message["params"] as? [String: Any] ?? [:])
+            // Child-session events carry their session under a reserved key.
+            var params = message["params"] as? [String: Any] ?? [:]
+            if let session = message["sessionId"] as? String { params[CefBrowser.devToolsSessionKey] = session }
+            event?(method, params)
         }
     }
 

@@ -4,33 +4,143 @@ import CefKit
 
 /// Runs against the actual bundled engine, not the WebKit compatibility tests.
 @MainActor enum ChromiumIntegrationChecks {
+    /// Set OASIS_CHROMIUM_CHECKS to a page URL to open it, run the checks and quit.
+    /// The report is written to OASIS_CHROMIUM_CHECKS_OUTPUT (or the temporary directory).
+    static func runFromEnvironmentIfRequested() {
+        let environment = ProcessInfo.processInfo.environment
+        guard let value = environment["OASIS_CHROMIUM_CHECKS"], let url = URL(string: value) else { return }
+        Task { @MainActor in
+            var session: BrowserSession?
+            for _ in 0..<200 {
+                session = BrowserLibrary.shared.activeSession
+                if session != nil { break }
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+            guard let session else { NSApp.terminate(nil); return }
+            let tab = session.newTab(url: url)
+            for _ in 0..<300 {
+                if tab.chromium?.browser != nil, !tab.isLoading, tab.url?.absoluteString.hasPrefix(value) == true { break }
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+            try? await Task.sleep(for: .milliseconds(500))
+            await run(session: session)
+            NSApp.terminate(nil)
+        }
+    }
+
+    /// Viewport and input changes reach the renderer asynchronously.
+    private static func settle(_ engine: ChromiumTabEngine, _ expression: String) async -> Bool {
+        for _ in 0..<40 {
+            if (try? await engine.evaluate(expression)) as? Bool == true { return true }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        return false
+    }
+
     static func run(session: BrowserSession) async {
         guard let tab = session.selectedTab, let engine = tab.chromium, let browser = engine.browser else { return }
         var checks: [String: Bool] = [:]
         var detail = ""
+        var diagnostics: [String: String] = [:]
         let originalSpoof = session.library.spoofModeEnabled
+        let originalSettings = engine.spoofSettings
+        let defaults = SpoofSettings()
         do {
             let version = try await browser.devTools("Browser.getVersion")
             checks["chromiumRuntime"] = (version["product"] as? String)?.contains("156.") == true
-            engine.setSpoof(true); await engine.waitForConfiguration()
+            engine.setSpoof(true, settings: defaults); await engine.waitForConfiguration()
+            try await Task.sleep(for: .milliseconds(300))
+            let lock = engine.lockedResolution ?? .zero
+            NSApp.activate(ignoringOtherApps: true)
+            engine.host.window?.makeKeyAndOrderFront(nil)
+            diagnostics["window"] = "active=\(NSApp.isActive) key=\(engine.host.window?.isKeyWindow == true) visible=\(engine.host.window?.occlusionState.contains(.visible) == true)"
+            _ = await settle(engine, "innerWidth === \(Int(lock.width))")
+            diagnostics["defaults"] = try await engine.evaluate("""
+                JSON.stringify({fs: !!document.fullscreenElement, fse: document.fullscreenEnabled, sw: screen.width, sh: screen.height,
+                  iw: innerWidth, ih: innerHeight, ow: outerWidth, oh: outerHeight, cd: screen.colorDepth,
+                  dm: matchMedia('(display-mode: fullscreen)').matches, db: matchMedia('(display-mode: browser)').matches,
+                  focus: document.hasFocus(), hidden: document.hidden, ua: navigator.userAgent, platform: navigator.platform,
+                  vendor: navigator.vendor, uad: navigator.userAgentData && navigator.userAgentData.platform, chrome: typeof window.chrome, uadIn: 'userAgentData' in navigator, secure: isSecureContext,
+                  lock: '\(Int(lock.width))x\(Int(lock.height))'})
+                """) as? String ?? "nil"
             checks["fullscreenAndGeometry"] = try await engine.evaluate("""
-                !!document.fullscreenElement && document.fullscreenEnabled && window.fullScreen &&
+                !!document.fullscreenElement && document.fullscreenEnabled &&
                 screen.width === innerWidth && screen.height === innerHeight &&
-                outerHeight === innerHeight && matchMedia('(display-mode: fullscreen)').matches &&
+                screen.width === \(Int(lock.width)) && screen.height === \(Int(lock.height)) &&
+                outerHeight === innerHeight && screen.colorDepth === 24 &&
+                matchMedia('(display-mode: fullscreen)').matches &&
                 !matchMedia('(display-mode: browser)').matches && document.hasFocus() && !document.hidden
                 """) as? Bool == true
+            checks["letterboxedPageView"] = {
+                guard let view = browser.nativeView, lock.width > 0 else { return false }
+                let ratio = view.frame.width / max(1, view.frame.height)
+                return abs(ratio - lock.width / lock.height) < 0.02
+            }()
             checks["browserIdentity"] = try await engine.evaluate("""
-                navigator.platform === 'Win32' && navigator.userAgent.includes('Chrome/156.')
+                navigator.platform === 'Win32' && navigator.userAgent.includes('Windows NT 10.0') &&
+                navigator.userAgent.includes('Chrome/156.') && navigator.vendor === 'Google Inc.' &&
+                navigator.userAgentData?.platform === 'Windows' && !!window.chrome
                 """) as? Bool == true
             checks["iframeCoverage"] = try await engine.evaluate("""
                 (() => { const f = document.createElement('iframe'); document.body.append(f);
                   const w = f.contentWindow; const active = !!w.document.fullscreenElement &&
-                    w.screen.height === w.innerHeight && w.document.hasFocus(); f.remove(); return active; })()
+                    w.screen.height === screen.height && w.document.hasFocus(); f.remove(); return active; })()
                 """) as? Bool == true
-            checks["fullscreenRequestStaysWindowed"] = try await engine.evaluate("""
-                (async () => { await document.body.requestFullscreen(); await document.exitFullscreen();
-                  return document.fullscreenElement === document.body; })()
-                """) as? Bool == true && engine.host.window?.styleMask.contains(.fullScreen) != true
+            checks["crossSiteIframeCoverage"] = try await engine.evaluate("""
+                (async () => {
+                  const frame = document.querySelector('iframe[data-cross-site]');
+                  if (!frame) return true;
+                  const reply = new Promise(resolve => {
+                    addEventListener('message', event => { if (event.data?.oasisProbe) resolve(event.data); }, {once: true});
+                    setTimeout(() => resolve(null), 3000);
+                  });
+                  frame.contentWindow.postMessage('probe', '*');
+                  const data = await reply;
+                  return !!data && data.active && data.focused && data.fullscreen && data.platform === 'Win32';
+                })()
+                """) as? Bool == true
+            checks["fullscreenExitHidden"] = try await engine.evaluate("""
+                (async () => { await document.exitFullscreen(); return !!document.fullscreenElement; })()
+                """) as? Bool == true
+            checks["selectionReadersEmpty"] = try await engine.evaluate("""
+                (() => { const p = document.createElement('p'); p.textContent = 'Selectable text'; document.body.append(p);
+                  const range = document.createRange(); range.selectNodeContents(p);
+                  const selection = getSelection(); selection.removeAllRanges(); selection.addRange(range);
+                  const hidden = selection.toString() === '' && selection.rangeCount === 0 && selection.type === 'None';
+                  selection.removeAllRanges(); p.remove(); return hidden; })()
+                """) as? Bool == true
+            // Native keys: typed characters reach a text field; shortcuts and other keys do not.
+            _ = try await engine.evaluate("""
+                (() => { const input = document.createElement('input'); input.id = '__oasisKeys';
+                  document.body.append(input); input.focus(); window.__oasisKeyLog = [];
+                  addEventListener('keydown', event => __oasisKeyLog.push(event.key)); })()
+                """)
+            for (key, text, code) in [("a", "a", 65), ("Escape", "", 27)] {
+                var params: [String: Any] = ["type": text.isEmpty ? "rawKeyDown" : "keyDown", "key": key, "windowsVirtualKeyCode": code]
+                if !text.isEmpty { params["text"] = text }
+                _ = try await browser.devTools("Input.dispatchKeyEvent", params: params)
+                _ = try await browser.devTools("Input.dispatchKeyEvent", params: ["type": "keyUp", "key": key, "windowsVirtualKeyCode": code])
+            }
+            diagnostics["keys"] = try await engine.evaluate("JSON.stringify([__oasisKeyLog, document.getElementById('__oasisKeys').value, document.activeElement?.id])") as? String ?? "nil"
+            checks["keyboardFiltering"] = await settle(engine, "__oasisKeyLog.join(',') === 'a' && document.getElementById('__oasisKeys').value === 'a'")
+            _ = try? await engine.evaluate("document.getElementById('__oasisKeys')?.remove()")
+            var firefox = defaults; firefox.browser = .firefox; firefox.platform = .linux64
+            engine.setSpoof(true, settings: firefox); await engine.waitForConfiguration()
+            checks["firefoxIdentity"] = try await engine.evaluate("""
+                navigator.userAgent.includes('Firefox/135.0') && navigator.userAgent.includes('Linux x86_64') &&
+                navigator.platform === 'Linux x86_64' && navigator.vendor === '' &&
+                navigator.userAgentData === undefined && window.chrome === undefined
+                """) as? Bool == true
+            var unlocked = defaults; unlocked.fullscreen = false; unlocked.focusVisibility = false
+            engine.setSpoof(true, settings: unlocked); await engine.waitForConfiguration()
+            try await Task.sleep(for: .milliseconds(300))
+            diagnostics["unlocked"] = try await engine.evaluate("JSON.stringify({fs: !!document.fullscreenElement, own: Object.hasOwn(screen, 'width'), iw: innerWidth, p: navigator.platform})") as? String ?? "nil"
+            checks["featureSwitchesApply"] = await settle(engine, """
+                !document.fullscreenElement && !Object.hasOwn(screen, 'width') && innerWidth !== \(Int(lock.width)) &&
+                navigator.platform === 'Win32'
+                """)
+            engine.setSpoof(true, settings: defaults); await engine.waitForConfiguration()
+            _ = await settle(engine, "innerWidth === \(Int(lock.width))")
             let before = try await browser.devTools("Page.captureScreenshot", params: ["format": "png", "fromSurface": true])
             checks["pageCapture"] = (before["data"] as? String).flatMap { Data(base64Encoded: $0) } != nil
 
@@ -62,21 +172,24 @@ import CefKit
             _ = try? await engine.evaluate("document.getElementById('__oasisCaptureTest')?.remove()")
             session.closeTab(away.id); session.select(tab.id)
             await engine.endCaptureViewport()
-            _ = try await browser.devTools("Emulation.setFocusEmulationEnabled", params: ["enabled": false])
-            engine.setSpoof(false); await engine.waitForConfiguration()
+            await engine.refreshFocusEmulation()
+            engine.setSpoof(false, settings: defaults); await engine.waitForConfiguration()
+            try await Task.sleep(for: .milliseconds(300))
             checks["restoreNormalAPIs"] = try await engine.evaluate("""
                 !document.fullscreenElement && !Object.hasOwn(screen, 'width') &&
-                !Object.hasOwn(window, 'fullScreen') && !window.__oasisActivityPrivacy_v2
+                !Object.hasOwn(window, 'fullScreen') && !window.__oasisActivityPrivacy_v2 &&
+                !navigator.userAgent.includes('Windows NT')
                 """) as? Bool == true
             do {
                 _ = try await engine.sharing.receive(["action": "begin"], enabled: false)
                 checks["sharingDisabledWithoutSpoof"] = false
             } catch { checks["sharingDisabledWithoutSpoof"] = true }
         } catch { detail = error.localizedDescription }
-        engine.setSpoof(originalSpoof); await engine.waitForConfiguration()
-        let passed = checks.count >= 10 && checks.values.allSatisfy { $0 } && detail.isEmpty
-        let report: [String: Any] = ["passed": passed, "checks": checks, "error": detail]
-        let output = FileManager.default.temporaryDirectory.appendingPathComponent("oasis-chromium-checks.json")
+        engine.setSpoof(originalSpoof, settings: originalSettings); await engine.waitForConfiguration()
+        let passed = checks.count >= 16 && checks.values.allSatisfy { $0 } && detail.isEmpty
+        let report: [String: Any] = ["passed": passed, "checks": checks, "error": detail, "diagnostics": diagnostics]
+        let output = ProcessInfo.processInfo.environment["OASIS_CHROMIUM_CHECKS_OUTPUT"].map { URL(fileURLWithPath: $0) }
+            ?? FileManager.default.temporaryDirectory.appendingPathComponent("oasis-chromium-checks.json")
         if let data = try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]) {
             try? data.write(to: output, options: .atomic)
         }

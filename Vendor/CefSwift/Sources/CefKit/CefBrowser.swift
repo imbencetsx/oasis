@@ -111,15 +111,20 @@ public final class CefBrowser: Identifiable {
     }
 
     /// In-process DevTools transport; no debugging port or localhost server.
-    public func devTools(_ method: String, params: [String: Any] = [:]) async throws -> [String: Any] {
+    /// Event parameter key naming the child session an event came from.
+    public static let devToolsSessionKey = "__sessionId"
+
+    public func devTools(_ method: String, params: [String: Any] = [:], sessionID: String? = nil) async throws -> [String: Any] {
         if toolsConnection == nil { toolsConnection = CefToolsConnection(browser: self) }
-        let data = try await toolsConnection!.send(method, params: params)
+        let data = try await toolsConnection!.send(method, params: params, sessionID: sessionID)
         return (try JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
     }
 
     /// Sends a DevTools command fire-and-forget without waiting for response.
-    public func sendDevToolsMessage(_ method: String, params: [String: Any] = [:]) {
-        guard let data = try? JSONSerialization.data(withJSONObject: ["id": 0, "method": method, "params": params]) else { return }
+    public func sendDevToolsMessage(_ method: String, params: [String: Any] = [:], sessionID: String? = nil) {
+        var message: [String: Any] = ["id": 0, "method": method, "params": params]
+        if let sessionID { message["sessionId"] = sessionID }
+        guard let data = try? JSONSerialization.data(withJSONObject: message) else { return }
         withHostInternal { host in
             _ = data.withUnsafeBytes { bytes in
                 host.pointee.send_dev_tools_message?(host, bytes.baseAddress, data.count)

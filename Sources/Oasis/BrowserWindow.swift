@@ -224,6 +224,8 @@ struct BrowserViewport: View {
 
 struct BrowserChrome: View {
   @Bindable var session: BrowserSession
+  @Environment(\.openSettings) private var openSettings
+  @AppStorage(SettingsSection.preferenceKey) private var settingsSection = SettingsSection.general
   var body: some View {
     GlassEffectContainer(spacing: 10) {
       HStack(spacing: 12) {
@@ -306,9 +308,12 @@ struct BrowserChrome: View {
                 .contentShape(Rectangle())
             }
             .toggleStyle(.button).buttonStyle(OasisButtonStyle()).tint(.primary)
-            .help(session.library.spoofModeEnabled ? "Spoof Mode: On" : "Spoof Mode: Off")
+            .help(session.library.spoofModeEnabled ? "Spoof Mode: On · Right-click for settings" : "Spoof Mode: Off · Right-click for settings")
             .accessibilityLabel("Spoof Mode")
             .accessibilityValue(session.library.spoofModeEnabled ? "On" : "Off")
+            .contextMenu {
+              Button("Spoof Mode Settings…", systemImage: "slider.horizontal.3") { openSpoofSettings() }
+            }
           }
           if let url = session.selectedTab?.url, !(session.selectedTab?.isBlankPage ?? true) {
             GlassChrome {
@@ -350,6 +355,7 @@ struct BrowserChrome: View {
                   get: { session.library.spoofModeEnabled },
                   set: { session.library.spoofModeEnabled = $0 }
                 ))
+              Button("Spoof Mode Settings…") { openSpoofSettings() }
               SettingsLink()
             } label: {
               Image(systemName: "ellipsis").font(.system(size: 17)).foregroundStyle(.primary)
@@ -363,6 +369,13 @@ struct BrowserChrome: View {
         }.frame(width: 230, alignment: .trailing)
       }
     }
+  }
+}
+
+extension BrowserChrome {
+  fileprivate func openSpoofSettings() {
+    settingsSection = .spoof
+    openSettings()
   }
 }
 

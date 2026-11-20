@@ -25,16 +25,22 @@ import WebKit
           const host = document.createElement('div');
           document.body.append(host);
           host.attachShadow({mode: 'closed'}).append(element);
-          const types = ['focus','blur','focusin','focusout','pointerenter','pointerleave',
-                         'pointerover','pointerout','mouseenter','mouseleave','mouseover',
-                         'mouseout','visibilitychange','webkitvisibilitychange'];
+          // Window focus, document visibility and fullscreen changes stay hidden,
+          // including script-dispatched ones. Element focus keeps working.
+          const windowTypes = ['focus','blur','focusin','focusout'];
+          const documentTypes = ['visibilitychange','webkitvisibilitychange','fullscreenchange','webkitfullscreenchange'];
           const listener = () => signals++;
-          for (const type of types) element.addEventListener(type, listener);
-          element.onpointerleave = listener;
+          for (const type of windowTypes) addEventListener(type, listener);
+          for (const type of documentTypes) document.addEventListener(type, listener);
+          const previousBlur = window.onblur;
+          window.onblur = listener;
           element.addEventListener('click', () => clicks++);
-          element.focus(); element.blur();
-          for (const type of types) element.dispatchEvent(new Event(type));
+          for (const type of windowTypes) dispatchEvent(new Event(type));
+          for (const type of documentTypes) document.dispatchEvent(new Event(type));
           element.click();
+          for (const type of windowTypes) removeEventListener(type, listener);
+          for (const type of documentTypes) document.removeEventListener(type, listener);
+          window.onblur = previousBlur;
           top.postMessage({tag: document.title, active: !!window.__oasisActivityPrivacy_v2,
             visible: !document.hidden && document.visibilityState === 'visible',
             fullscreen: document.fullscreenElement === document.documentElement && document.webkitIsFullScreen,

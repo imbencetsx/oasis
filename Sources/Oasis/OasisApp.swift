@@ -10,6 +10,9 @@ import CefSwiftUI
         NSWindow.allowsAutomaticWindowTabbing = false
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
+        #if DEBUG
+        ChromiumIntegrationChecks.runFromEnvironmentIfRequested()
+        #endif
     }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         AppLifecycle.isTerminating = true
@@ -23,6 +26,10 @@ import CefSwiftUI
         var config = CefConfiguration()
         config.noSandbox = false
         config.safeStorage = .keychain
+        #if DEBUG
+        // Automated engine checks run with an isolated profile and no keychain prompt.
+        if ProcessInfo.processInfo.environment["OASIS_CHROMIUM_CHECKS"] != nil { config.safeStorage = .mockKeychain }
+        #endif
         let root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("com.oasis.browser/Chromium", isDirectory: true)
         config.rootCachePath = root

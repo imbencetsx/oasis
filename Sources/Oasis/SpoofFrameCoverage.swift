@@ -6,25 +6,27 @@ import WebKit
     private weak var webView: WKWebView?
     private var dispatcher: SpoofFrameDispatcher?
     private var frames: [String: WKFrameInfo] = [:]
-    private var enabled = false
+    private var settings: SpoofSettings?
+    private var enabled: Bool { settings != nil }
 
     func prepare(_ controller: WKUserContentController) {
         dispatcher = SpoofFrameDispatcher.shared(for: controller)
     }
 
-    func attach(_ webView: WKWebView, enabled: Bool) {
+    func attach(_ webView: WKWebView, settings: SpoofSettings?) {
         self.webView = webView
-        self.enabled = enabled
+        self.settings = settings
         dispatcher?.clients.setObject(self, forKey: webView)
     }
 
-    func apply(enabled: Bool) {
-        self.enabled = enabled
+    func apply(settings: SpoofSettings?) {
+        self.settings = settings
         for (token, frame) in frames { apply(to: frame, token: token) }
     }
 
     private func apply(to frame: WKFrameInfo, token: String) {
-        webView?.evaluateJavaScript(enabled ? SpoofMode.frameSource : SpoofMode.frameRestoreSource,
+        let source = settings.map { SpoofMode.frameSource($0, resolution: .zero) } ?? SpoofMode.frameRestoreSource
+        webView?.evaluateJavaScript(source,
                                    in: frame, in: .page) { [weak self] result in
             if case .failure = result, let self, self.frames[token] === frame {
                 self.frames.removeValue(forKey: token)

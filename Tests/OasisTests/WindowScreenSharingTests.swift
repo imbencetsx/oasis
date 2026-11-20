@@ -116,7 +116,7 @@ import WebKit
             mode = 'ended';
             await pending.shift()();
             return recovered && track.readyState === 'ended' && ended === 1 && trackEnds === 1 &&
-              pending.length === 0 && cleanups.size === 0;
+              pending.length === 0 && sharingStops.size === 0;
             """, arguments: [:], in: nil, contentWorld: .page) as? Bool
         #expect(result == true)
     }
@@ -247,26 +247,26 @@ import WebKit
             const streamClone = stream.clone().clone();
             const clonedTrack = streamClone.getVideoTracks()[0];
             const metadata = [track, clone, clonedTrack].every(value =>
-              value.label === 'Screen 1' && value.getSettings().displaySurface === 'monitor' &&
+              value.label === 'screen:0:0' && value.getSettings().displaySurface === 'monitor' &&
               value.getSettings().deviceId === settings.deviceId &&
               value.getCapabilities().displaySurface === 'monitor' &&
               value.getConstraints().displaySurface === 'monitor' &&
               MediaStreamTrack.prototype.getSettings.call(value).displaySurface === 'monitor');
             const unrelated = fixture.captureStream().getVideoTracks()[0];
-            const isolated = unrelated.getSettings().displaySurface !== 'monitor' && unrelated.label !== 'Screen 1';
+            const isolated = unrelated.getSettings().displaySurface !== 'monitor' && unrelated.label !== 'screen:0:0';
             unrelated.stop();
             const live = track.readyState === 'live' && stream.getAudioTracks().length === 0;
             track.stop(); track.stop();
             const clonesRemainLive = clone.readyState === 'live' && clonedTrack.readyState === 'live' &&
               !calls.includes('end');
             // Native Stop Sharing / mode restoration must stop every remaining clone.
-            for (const cleanup of [...cleanups]) cleanup();
+            for (const stop of [...sharingStops.values()]) stop();
             return live && settings.displaySurface === 'monitor' && settings.width === 64 &&
               metadata && isolated && clonesRemainLive && settings.screenPixelRatio === 2 &&
               supported.displaySurface === true && supported.logicalSurface === true && supported.cursor === true &&
               settings.cursor === 'always' && capabilities.logicalSurface === true && capabilities.cursor.join(',') === 'always' &&
               constraints.cursor === 'always' && clonedTrack.readyState === 'ended' && clone.readyState === 'ended' &&
-              track.readyState === 'ended' && cleanups.size === 0 &&
+              track.readyState === 'ended' && sharingStops.size === 0 &&
               calls.filter(action => action === 'begin').length === 1 &&
               calls.filter(action => action === 'end').length === 1;
             """, arguments: [:], in: nil, contentWorld: .page) as? Bool
