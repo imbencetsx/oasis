@@ -223,3 +223,45 @@ struct SpoofIdentity: Equatable, Sendable {
         return (frame, scale)
     }
 }
+
+/// A website Spoof Mode applies to, like a Prism site rule. A selected
+/// top-level website includes its embedded frames.
+struct SpoofSite: Codable, Hashable, Identifiable, Sendable {
+    static let preferenceKey = "spoofSites"
+
+    var host: String
+    var includeSubdomains = false
+    var id: String { host }
+
+    func matches(host other: String) -> Bool {
+        other == host || (includeSubdomains && other.hasSuffix("." + host))
+    }
+
+    /// The rule host for a web address: lowercase, without a trailing dot.
+    static func host(of url: URL?) -> String? {
+        guard let url, ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
+              var host = url.host?.lowercased(), !host.isEmpty else { return nil }
+        while host.hasSuffix(".") { host.removeLast() }
+        return host.isEmpty ? nil : host
+    }
+
+    /// Accepts a hostname or a pasted address.
+    static func normalized(_ input: String) -> String? {
+        let text = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return nil }
+        let url = text.contains("://") ? URL(string: text) : URL(string: "https://" + text)
+        guard let host = host(of: url), host.contains(".") || host == "localhost",
+              host.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "." || $0 == "-" || $0 == ":" }) else { return nil }
+        return host
+    }
+
+    static func load(from defaults: UserDefaults = .standard) -> [SpoofSite] {
+        guard let data = defaults.data(forKey: preferenceKey),
+              let sites = try? JSONDecoder().decode([SpoofSite].self, from: data) else { return [] }
+        return sites
+    }
+
+    static func save(_ sites: [SpoofSite], to defaults: UserDefaults = .standard) {
+        if let data = try? JSONEncoder().encode(sites) { defaults.set(data, forKey: preferenceKey) }
+    }
+}

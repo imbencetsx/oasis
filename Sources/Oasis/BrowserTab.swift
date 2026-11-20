@@ -55,6 +55,13 @@ final class BrowserTab: NSObject, Identifiable, WKNavigationDelegate, WKUIDelega
     @ObservationIgnored private var faviconTask: Task<Void, Never>?
     @ObservationIgnored private var observations: [NSKeyValueObservation] = []
     @ObservationIgnored private var spoofModeEnabled: Bool
+    /// Whether Spoof Mode is applied to this tab's current website.
+    var spoofActive = false
+    /// Decides Spoof Mode from the tab's website (the library's site rules).
+    /// Without one, Spoof Mode follows `setSpoofMode` only.
+    @ObservationIgnored var spoofPolicy: (@MainActor (URL?) -> Bool)? {
+        didSet { chromium?.spoofPolicy = spoofPolicy }
+    }
     @ObservationIgnored private(set) var spoofSettings: SpoofSettings
     @ObservationIgnored private let spoofFrames: SpoofFrameCoverage
     @ObservationIgnored private let windowSharing = WindowScreenSharing()
@@ -128,6 +135,7 @@ final class BrowserTab: NSObject, Identifiable, WKNavigationDelegate, WKUIDelega
         self.isPrivate = isPrivate
         self.spoofModeEnabled = spoofModeEnabled
         self.spoofSettings = spoofSettings
+        self.spoofActive = spoofModeEnabled
         let coverage = SpoofFrameCoverage()
         spoofFrames = coverage
         let config = configuration ?? WKWebViewConfiguration()
@@ -242,11 +250,12 @@ final class BrowserTab: NSObject, Identifiable, WKNavigationDelegate, WKUIDelega
         session?.save()
     }
     func setSpoofMode(_ enabled: Bool) { setSpoofMode(enabled, settings: spoofSettings) }
-    func setSpoofMode(_ enabled: Bool, settings: SpoofSettings) {
+    func setSpoofMode(_ enabled: Bool, settings: SpoofSettings, reload: Bool = false) {
         guard enabled != spoofModeEnabled || settings != spoofSettings || chromium == nil else { return }
         spoofModeEnabled = enabled
         spoofSettings = settings
-        if let chromium { chromium.setSpoof(enabled, settings: settings); return }
+        spoofActive = enabled
+        if let chromium { chromium.setSpoof(enabled, settings: settings, reload: reload); return }
         windowSharing.apply(enabled: enabled && settings.screenshare)
         guard let webView = contentView else { return }
         webView.customUserAgent = webKitUserAgent
@@ -254,6 +263,28 @@ final class BrowserTab: NSObject, Identifiable, WKNavigationDelegate, WKUIDelega
         spoofFrames.apply(settings: webKitSpoofSettings)
         applySpoofModeToDocument()
     }
+    /// Applies the site rules to the current website. A tab whose Spoof Mode
+    /// changes is reloaded once the change has been applied.
+    func reconcileSpoofMode(reload: Bool) {
+        guard let spoofPolicy else { return }
+        let wanted = spoofPolicy(isBlankPage ? nil : (url ?? deferredURL))
+        guard wanted != spoofModeEnabled else { return }
+        // A tab that has not loaded yet picks the state up when it loads.
+        setSpoofMode(wanted, settings: spoofSettings, reload: reload && hasWebView && deferredURL == nil)
+    }
+
+    /// Feature switches changed; keep this tab's on/off state.
+    func updateSpoofSettings(_ settings: SpoofSettings) {
+        guard settings != spoofSettings else { return }
+        setSpoofMode(spoofModeEnabled, settings: settings)
+    }
+
+    /// The Chromium engine switched Spoof Mode while navigating between websites.
+    func spoofModeDidChange(_ enabled: Bool) {
+        spoofModeEnabled = enabled
+        if spoofActive != enabled { spoofActive = enabled }
+    }
+
     // WebKit cannot emulate a viewport, so its script follows the live viewport
     // and needs no locked resolution.
     private var webKitSpoofSettings: SpoofSettings? { spoofModeEnabled ? spoofSettings : nil }

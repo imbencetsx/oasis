@@ -227,6 +227,12 @@ public final class CefRuntime {
         }
     }
 
+    /// Set CEFSWIFT_TRACE_SHUTDOWN to log the quit sequence to standard error.
+    static func traceShutdown(_ message: String) {
+        guard ProcessInfo.processInfo.environment["CEFSWIFT_TRACE_SHUTDOWN"] != nil else { return }
+        FileHandle.standardError.write(Data("CefSwift shutdown: \(message)\n".utf8))
+    }
+
     /// Shuts CEF down and unloads the framework. All browsers must already
     /// be closed. Call once, at process exit.
     public func shutdown() {
@@ -400,9 +406,17 @@ public final class CefRuntime {
 
     func unregisterBrowser(id: Int32) {
         browsers[id] = nil
+        Self.traceShutdown("browser \(id) closed; \(browsers.count) left; termination requested: \(isTerminationRequested)")
         if isTerminationRequested && browsers.isEmpty {
-            // Re-enter terminate:; with no browsers left it now proceeds.
-            NSApp.terminate(nil)
+            // Re-enter terminate: once this OnBeforeClose callback has returned.
+            // Shutting CEF down from inside its own callback trips a CHECK in
+            // Chromium (the app crashed on quit with tabs open).
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    Self.traceShutdown("last browser closed; terminating")
+                    NSApp.terminate(nil)
+                }
+            }
         }
     }
 
@@ -410,6 +424,7 @@ public final class CefRuntime {
     /// may terminate immediately.
     func handleTerminationRequest() -> Bool {
         guard isInitialized else { return true }
+        Self.traceShutdown("terminate requested with \(browsers.count) browsers")
         if browsers.isEmpty {
             shutdown()
             return true

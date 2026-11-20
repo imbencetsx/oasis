@@ -298,19 +298,19 @@ struct BrowserChrome: View {
           }
           GlassChrome {
             Toggle(isOn: Binding(
-              get: { session.library.spoofModeEnabled },
-              set: { session.library.spoofModeEnabled = $0 }
+              get: { spoofActive },
+              set: { _ in toggleSpoofForCurrentSite() }
             )) {
-              Image(systemName: session.library.spoofModeEnabled ? "theatermasks.fill" : "theatermasks")
+              Image(systemName: spoofActive ? "theatermasks.fill" : "theatermasks")
                 .font(.system(size: 15)).foregroundStyle(.primary)
                 .frame(width: 38, height: 38)
-                .background(.primary.opacity(session.library.spoofModeEnabled ? 0.12 : 0), in: Capsule())
+                .background(.primary.opacity(spoofActive ? 0.12 : 0), in: Capsule())
                 .contentShape(Rectangle())
             }
             .toggleStyle(.button).buttonStyle(OasisButtonStyle()).tint(.primary)
-            .help(session.library.spoofModeEnabled ? "Spoof Mode: On · Right-click for settings" : "Spoof Mode: Off · Right-click for settings")
-            .accessibilityLabel("Spoof Mode")
-            .accessibilityValue(session.library.spoofModeEnabled ? "On" : "Off")
+            .help(spoofHelp)
+            .accessibilityLabel("Spoof Mode for this website")
+            .accessibilityValue(spoofActive ? "On" : "Off")
             .contextMenu {
               Button("Spoof Mode Settings…", systemImage: "slider.horizontal.3") { openSpoofSettings() }
             }
@@ -350,11 +350,12 @@ struct BrowserChrome: View {
                 session.selectedTab?.isBlankPage ?? true)
               Divider()
               Toggle(
-                "Spoof Mode",
+                "Spoof Mode for This Website",
                 isOn: Binding(
-                  get: { session.library.spoofModeEnabled },
-                  set: { session.library.spoofModeEnabled = $0 }
+                  get: { spoofActive },
+                  set: { _ in toggleSpoofForCurrentSite() }
                 ))
+                .disabled(SpoofSite.host(of: session.selectedTab?.url) == nil || session.selectedTab?.isBlankPage != false)
               Button("Spoof Mode Settings…") { openSpoofSettings() }
               SettingsLink()
             } label: {
@@ -373,6 +374,18 @@ struct BrowserChrome: View {
 }
 
 extension BrowserChrome {
+  /// Spoof Mode applies per website, as in Prism: on means the selected tab's
+  /// website is in the list.
+  fileprivate var spoofActive: Bool { session.selectedTab?.spoofActive == true }
+  fileprivate var spoofHelp: String {
+    let host = session.selectedTab?.isBlankPage == false ? SpoofSite.host(of: session.selectedTab?.url) : nil
+    guard let host else { return "Spoof Mode: open a website to turn it on for that site · Right-click for settings" }
+    return "Spoof Mode for \(host): \(spoofActive ? "On" : "Off") · Right-click for settings"
+  }
+  fileprivate func toggleSpoofForCurrentSite() {
+    let url = session.selectedTab?.isBlankPage == false ? session.selectedTab?.url : nil
+    if let message = session.library.toggleSpoof(for: url) { session.notice = message }
+  }
   fileprivate func openSpoofSettings() {
     settingsSection = .spoof
     openSettings()

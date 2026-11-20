@@ -49,6 +49,43 @@ import WebKit
         #expect(settings.identity?.browser == .chrome && settings.identity?.platform == .win64)
     }
 
+    @Test func websiteRulesMatchHostsLikePrism() {
+        #expect(SpoofSite.host(of: URL(string: "https://Example.COM./path")) == "example.com")
+        #expect(SpoofSite.host(of: URL(string: "about:blank")) == nil)
+        #expect(SpoofSite.host(of: URL(string: "file:///tmp/a.html")) == nil)
+        #expect(SpoofSite.normalized("  https://exam.example.org/test?q=1 ") == "exam.example.org")
+        #expect(SpoofSite.normalized("example.com") == "example.com")
+        #expect(SpoofSite.normalized("not a host") == nil)
+        let exact = SpoofSite(host: "example.com")
+        #expect(exact.matches(host: "example.com") && !exact.matches(host: "www.example.com") && !exact.matches(host: "badexample.com"))
+        let wide = SpoofSite(host: "example.com", includeSubdomains: true)
+        #expect(wide.matches(host: "a.b.example.com") && !wide.matches(host: "badexample.com"))
+    }
+
+    @Test func togglingFollowsTheCurrentWebsite() {
+        let saved = UserDefaults.standard.data(forKey: SpoofSite.preferenceKey)
+        defer {
+            if let saved { UserDefaults.standard.set(saved, forKey: SpoofSite.preferenceKey) }
+            else { UserDefaults.standard.removeObject(forKey: SpoofSite.preferenceKey) }
+        }
+        let library = BrowserLibrary(storageURL: FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString).appendingPathComponent("Library.json"))
+        library.spoofSites = []
+        let page = URL(string: "https://quiz.example.com/test")!
+        #expect(library.toggleSpoof(for: page) == nil)
+        #expect(library.isSpoofed(page) && !library.isSpoofed(URL(string: "https://example.com")!))
+        #expect(library.spoofSites == [SpoofSite(host: "quiz.example.com")])
+        #expect(library.toggleSpoof(for: page) == nil)
+        #expect(!library.isSpoofed(page) && library.spoofSites.isEmpty)
+        // A website covered by a parent rule is changed in Settings, not by the toggle.
+        library.spoofSites = [SpoofSite(host: "example.com", includeSubdomains: true)]
+        #expect(library.isSpoofed(page))
+        #expect(library.toggleSpoof(for: page) != nil)
+        #expect(library.isSpoofed(page))
+        #expect(library.toggleSpoof(for: URL(string: "about:blank")) != nil)
+        library.spoofSites = []
+    }
+
     @Test func lockedResolutionLetterboxesIntoTheAvailableArea() {
         let fit = SpoofResolution.fit(CGSize(width: 1920, height: 1080), in: CGRect(x: 0, y: 64, width: 960, height: 800))
         #expect(fit.scale == 0.5)

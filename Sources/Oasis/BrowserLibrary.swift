@@ -22,12 +22,16 @@ final class BrowserLibrary {
     }
     var storageError: String?
     var isClearingWebsiteData = false
-    var spoofModeEnabled = false {
+    /// Websites Spoof Mode applies to, as in Prism. Tabs whose website starts
+    /// or stops matching are reconfigured and reloaded.
+    var spoofSites = SpoofSite.load() {
         didSet {
-            guard spoofModeEnabled != oldValue else { return }
-            if !spoofModeEnabled { ClipboardTyping.shared.stop() }
-            UserDefaults.standard.set(spoofModeEnabled, forKey: "spoofMode")
-            applySpoofMode()
+            guard spoofSites != oldValue else { return }
+            SpoofSite.save(spoofSites)
+            for session in sessions.values {
+                for tab in session.tabs { tab.reconcileSpoofMode(reload: true) }
+            }
+            if ClipboardTyping.shared.isTyping, activeSession?.selectedTab?.spoofActive != true { ClipboardTyping.shared.stop() }
         }
     }
     /// Feature switches for Spoof Mode. Changes apply immediately to open tabs.
@@ -35,13 +39,34 @@ final class BrowserLibrary {
         didSet {
             guard spoofSettings != oldValue else { return }
             spoofSettings.save()
-            applySpoofMode()
+            for session in sessions.values {
+                for tab in session.tabs { tab.updateSpoofSettings(spoofSettings) }
+            }
         }
     }
-    private func applySpoofMode() {
-        for session in sessions.values {
-            for tab in session.tabs { tab.setSpoofMode(spoofModeEnabled, settings: spoofSettings) }
+
+    /// The rule covering a website, if any.
+    func spoofSite(for url: URL?) -> SpoofSite? {
+        guard let host = SpoofSite.host(of: url) else { return nil }
+        return spoofSites.first { $0.host == host } ?? spoofSites.first { $0.matches(host: host) }
+    }
+    func isSpoofed(_ url: URL?) -> Bool { spoofSite(for: url) != nil }
+
+    /// Turns Spoof Mode on or off for a tab's website. A website covered only by
+    /// a parent domain's "include subdomains" rule is managed in Settings.
+    /// Returns a message to show when nothing changed.
+    @discardableResult
+    func toggleSpoof(for url: URL?) -> String? {
+        guard let host = SpoofSite.host(of: url) else { return "Spoof Mode applies to websites. Open a website first." }
+        if let rule = spoofSite(for: url) {
+            guard rule.host == host else {
+                return "Spoof Mode for \(host) comes from the \(rule.host) rule (with subdomains). Change it in Settings › Spoof Mode."
+            }
+            spoofSites.removeAll { $0.host == host }
+        } else {
+            spoofSites.append(SpoofSite(host: host))
         }
+        return nil
     }
     @ObservationIgnored private let storage: LibraryStorage
     @ObservationIgnored private var saveTask: Task<Void, Never>?
@@ -56,7 +81,8 @@ final class BrowserLibrary {
     }
 
     init(storageURL: URL? = nil) {
-        spoofModeEnabled = UserDefaults.standard.bool(forKey: "spoofMode")
+        // Spoof Mode used to be one global switch. It now applies per website.
+        UserDefaults.standard.removeObject(forKey: "spoofMode")
         let fileURL = storageURL ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Oasis", isDirectory: true).appendingPathComponent("Library.json")
         storage = LibraryStorage(url: fileURL)

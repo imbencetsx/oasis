@@ -152,9 +152,10 @@ private struct BrowserSettingsPage: View {
                 Text("History and bookmarks stay on your Mac. No account or analytics service.")
             }
             Section {
-                Toggle("Spoof Mode", isOn: $library.spoofModeEnabled)
+                LabeledContent("Spoof Mode", value: library.spoofSites.isEmpty ? "No websites" :
+                    library.spoofSites.count == 1 ? "1 website" : "\(library.spoofSites.count) websites")
             } header: { Text("Activity privacy") } footer: {
-                Text("Choose which protections Spoof Mode uses in the Spoof Mode tab.")
+                Text("Spoof Mode is turned on per website with the theater-masks button. Manage websites and features in the Spoof Mode tab.")
             }
             Section {
                 LabeledContent {
@@ -315,15 +316,44 @@ private struct SettingsSlider: View {
 /// applies immediately to open tabs while Spoof Mode is on.
 private struct SpoofSettingsPage: View {
     @Bindable var library: BrowserLibrary
+    @State private var newSite = ""
+    @State private var newSiteSubdomains = false
 
     var body: some View {
         Form {
             Section {
-                Toggle(isOn: $library.spoofModeEnabled) {
-                    SettingsLabel("Spoof Mode", detail: "Turn the features below on for every website.")
+                if library.spoofSites.isEmpty {
+                    Text("No websites yet. Open a website and click the theater-masks button, or add one here.")
+                        .foregroundStyle(.secondary)
                 }
-            } footer: {
-                Text("Preferences take effect immediately on open tabs while Spoof Mode is on. Reload pages for coverage from the start of the document.")
+                ForEach(library.spoofSites) { site in
+                    HStack {
+                        Text(site.host).lineLimit(1).truncationMode(.middle)
+                        Spacer()
+                        Toggle("Subdomains", isOn: Binding(
+                            get: { site.includeSubdomains },
+                            set: { value in
+                                if let index = library.spoofSites.firstIndex(where: { $0.host == site.host }) {
+                                    library.spoofSites[index].includeSubdomains = value
+                                }
+                            }))
+                        .toggleStyle(.checkbox)
+                        Button("Remove", systemImage: "minus.circle") {
+                            library.spoofSites.removeAll { $0.host == site.host }
+                        }
+                        .labelStyle(.iconOnly).buttonStyle(.borderless)
+                        .help("Turn Spoof Mode off for \(site.host)")
+                    }
+                }
+                HStack {
+                    TextField("Add a website", text: $newSite, prompt: Text("example.com"))
+                        .labelsHidden()
+                        .onSubmit(addSite)
+                    Toggle("Subdomains", isOn: $newSiteSubdomains).toggleStyle(.checkbox)
+                    Button("Add", action: addSite).disabled(SpoofSite.normalized(newSite) == nil)
+                }
+            } header: { Text("Websites") } footer: {
+                Text("Spoof Mode applies only to these websites and their embedded frames. Pages reload when a website is added or removed.")
             }
             Section("Spoof mode features") {
                 feature("Focus & document visibility",
@@ -383,6 +413,17 @@ private struct SpoofSettingsPage: View {
             }
         }
         .formStyle(.grouped)
+    }
+
+    private func addSite() {
+        guard let host = SpoofSite.normalized(newSite) else { return }
+        if let index = library.spoofSites.firstIndex(where: { $0.host == host }) {
+            library.spoofSites[index].includeSubdomains = newSiteSubdomains
+        } else {
+            library.spoofSites.append(SpoofSite(host: host, includeSubdomains: newSiteSubdomains))
+        }
+        newSite = ""
+        newSiteSubdomains = false
     }
 
     private func feature(_ title: LocalizedStringResource, _ detail: LocalizedStringResource,

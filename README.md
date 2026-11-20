@@ -55,11 +55,17 @@ To create an installer:
 
 ## Spoof Mode
 
-Toggle **Spoof Mode** from the theater-masks button in the toolbar. Right-click
-it (or choose **Spoof Mode Settings…** in the page menu) to open
-**Settings → Spoof Mode**, where each feature can be switched on or off. Changes
-apply immediately to open tabs; reload a page for coverage from the start of
-the document. Every feature is on by default:
+Spoof Mode applies **per website**, as in Prism. Open a website and click the
+theater-masks button in the toolbar to turn it on or off for that site; the page
+reloads once the change has been applied, so it starts over in the new mode. A
+selected website includes its embedded frames, and every tab on it is covered
+from the start of each document. Other websites are not affected, and tabs
+switch automatically as you navigate between selected and other websites.
+
+Right-click the button (or choose **Spoof Mode Settings…** in the page menu) to
+open **Settings → Spoof Mode**. There you can add or remove websites, include
+their subdomains, and switch each feature on or off. Feature changes apply
+immediately to open tabs. Every feature is on by default:
 
 | Feature | What websites see |
 | --- | --- |
@@ -80,8 +86,8 @@ signals, and it cannot guarantee that switching tabs or windows is undetectable.
 
 ### Screen and tab sharing
 
-With **Spoof Mode** and screenshare spoofing enabled, an HTTPS page can ask to
-share your screen. The share sheet offers:
+On a website with Spoof Mode and screenshare spoofing enabled, an HTTPS page
+can ask to share your screen. The share sheet offers:
 
 - **This tab** – only this tab's webview is captured: no address bar, sidebar,
   other tabs, desktop, or audio. The feed stays tied to the originating tab when

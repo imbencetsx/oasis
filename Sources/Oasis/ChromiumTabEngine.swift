@@ -12,6 +12,11 @@ import SwiftUI
     private var ready = false
     private var closed = false
     private var spoofEnabled: Bool
+    /// Decides Spoof Mode for a website (the library's site rules).
+    var spoofPolicy: (@MainActor (URL?) -> Bool)?
+    /// A navigation switched Spoof Mode; check the new document once it loads.
+    private var verifyAfterLoad = false
+    private var verificationReloadURL: URL?
     private(set) var spoofSettings: SpoofSettings
     private var scriptID: String?
     /// The full-screen resolution the page renders at while the fullscreen lock is on.
@@ -46,7 +51,11 @@ import SwiftUI
         options.runtimeStyle = .alloy
         options.profile = profile
         options.backgroundColor = NSColor.windowBackgroundColor
-        let startURL = requestedURL.absoluteString != "about:blank" ? requestedURL : URL(string: "about:blank")!
+        // Always start blank: the page must not begin loading before Spoof Mode's
+        // document script and identity overrides are installed (restored tabs
+        // used to load first and were only partly covered).
+        let startURL = URL(string: "about:blank")!
+        if let spoofPolicy { applyPolicyState(spoofPolicy(requestedURL)) }
         let browser = CefBrowser.createBrowser(parentView: host, bounds: host.pageBounds,
             url: startURL, options: options, delegate: self)
         self.browser = browser
@@ -78,21 +87,52 @@ import SwiftUI
         certificateFailedURL = nil
         requestedURL = url
         sharing.stop()
-        if ready { browser?.load(url) }
+        guard ready else {
+            if let spoofPolicy { applyPolicyState(spoofPolicy(url)) }
+            return
+        }
+        // Switch Spoof Mode before the first request when the website changes it.
+        if let spoofPolicy, spoofPolicy(url) != spoofEnabled {
+            setSpoof(spoofPolicy(url), settings: spoofSettings)
+            let configuration = configurationTask
+            Task { [weak self] in
+                await configuration?.value
+                guard let self, self.requestedURL == url else { return }
+                self.browser?.load(url)
+            }
+            return
+        }
+        browser?.load(url)
+    }
+
+    /// Records the site rules' state before the engine is configured.
+    private func applyPolicyState(_ enabled: Bool) {
+        guard enabled != spoofEnabled else { return }
+        spoofEnabled = enabled
+        tab?.spoofModeDidChange(enabled)
     }
 
     func setSpoof(_ enabled: Bool) { setSpoof(enabled, settings: spoofSettings) }
-    func setSpoof(_ enabled: Bool, settings: SpoofSettings) {
+    /// - Parameter reload: reload the page once the change has been applied
+    ///   successfully, so the website starts over in the new mode.
+    func setSpoof(_ enabled: Bool, settings: SpoofSettings, reload: Bool = false) {
+        let changed = enabled != spoofEnabled
         spoofEnabled = enabled
         spoofSettings = settings
+        if changed { tab?.spoofModeDidChange(enabled) }
         if !enabled || !settings.screenshare { sharing.stop() }
         guard ready else { return }
         // Apply changes in order; an earlier configuration may still be running.
         let previous = configurationTask
         configurationTask = Task { [weak self] in
             await previous?.value
-            do { try await self?.configureSpoof() }
-            catch { self?.tab?.session?.notice = error.localizedDescription }
+            guard let self else { return }
+            do {
+                try await self.configureSpoof()
+                if reload, self.spoofEnabled == enabled, let url = self.browser?.url, url.isWebURL {
+                    self.browser?.reload()
+                }
+            } catch { self.tab?.session?.notice = error.localizedDescription }
         }
     }
     func waitForConfiguration() async { await configurationTask?.value }
@@ -433,8 +473,35 @@ import SwiftUI
         tab?.session?.save()
     }
     func browser(_ b: CefBrowser, didChangeProgress progress: Double) { tab?.progress = progress }
+    func browser(_ b: CefBrowser, willNavigateMainFrameTo url: URL?, isRedirect: Bool) {
+        guard ready, let spoofPolicy, let url, url.isWebURL else { return }
+        let wanted = spoofPolicy(url)
+        guard wanted != spoofEnabled else { return }
+        // Moving to or from a selected website. The change is usually applied
+        // before the new document starts; the load is verified to be sure.
+        verifyAfterLoad = true
+        setSpoof(wanted, settings: spoofSettings)
+    }
+
+    /// After a navigation switched Spoof Mode, reload once if the document
+    /// started before the change took effect.
+    private func verifySpoofedDocument() async {
+        guard verifyAfterLoad, let browser, let url = browser.url, url.isWebURL else { return }
+        verifyAfterLoad = false
+        await configurationTask?.value
+        let expectedAgent = spoofEnabled ? spoofSettings.identity?.userAgent : nil
+        let script = "({active: !!window.\(SpoofMode.stateKey), agent: navigator.userAgent})"
+        guard let state = try? await evaluate(script) as? [String: Any] else { return }
+        let active = state["active"] as? Bool == true
+        let agentMatches = expectedAgent.map { state["agent"] as? String == $0 } ?? true
+        guard active != spoofEnabled || !agentMatches, verificationReloadURL != url else { return }
+        verificationReloadURL = url
+        browser.reload()
+    }
+
     func browser(_ b: CefBrowser, didChangeLoading loading: Bool, canGoBack: Bool, canGoForward: Bool) {
         guard ready else { return }
+        if !loading, verifyAfterLoad { Task { [weak self] in await self?.verifySpoofedDocument() } }
         tab?.isLoading = loading; tab?.canGoBack = canGoBack; tab?.canGoForward = canGoForward
         if loading { tab?.errorMessage = nil }
         else if ready {

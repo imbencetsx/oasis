@@ -116,6 +116,10 @@ public protocol CefBrowserDelegate: AnyObject {
     /// ``CefNavigationDecision/allow``.
     func browser(_ b: CefBrowser, decidePolicyForNavigation url: URL?, isRedirect: Bool, userGesture: Bool) -> CefNavigationDecision
 
+    /// An allowed navigation of the main frame is about to start (including
+    /// redirects and history navigations), before its request is sent.
+    func browser(_ b: CefBrowser, willNavigateMainFrameTo url: URL?, isRedirect: Bool)
+
     /// The page tried to open `url` in a new tab/window (middle-click,
     /// ctrl-click, etc.). Returns whether you handled it; returning `true`
     /// cancels CEF's default new-window behavior.
@@ -199,6 +203,7 @@ extension CefBrowserDelegate {
     public func browser(_ b: CefBrowser, requestsPermission request: CefPermissionRequest) -> CefPermissionDecision { .deny }
 
     public func browser(_ b: CefBrowser, decidePolicyForNavigation url: URL?, isRedirect: Bool, userGesture: Bool) -> CefNavigationDecision { .allow }
+    public func browser(_ b: CefBrowser, willNavigateMainFrameTo url: URL?, isRedirect: Bool) {}
     public func browser(_ b: CefBrowser, didRequestNewTab url: URL?) -> Bool { false }
     public func browser(_ b: CefBrowser, didEncounterCertificateError url: URL?, errorCode: Int) -> Bool { false }
     public func browser(_ b: CefBrowser, renderProcessDidTerminate reason: CefTerminationReason, errorCode: Int) {}

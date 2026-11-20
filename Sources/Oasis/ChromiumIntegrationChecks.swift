@@ -11,7 +11,7 @@ import CefKit
         guard let value = environment["OASIS_CHROMIUM_CHECKS"], let url = URL(string: value) else { return }
         Task { @MainActor in
             var session: BrowserSession?
-            for _ in 0..<200 {
+            for _ in 0..<600 {
                 session = BrowserLibrary.shared.anySession
                 if session != nil { break }
                 try? await Task.sleep(for: .milliseconds(100))
@@ -23,7 +23,9 @@ import CefKit
                 try? await Task.sleep(for: .milliseconds(100))
             }
             try? await Task.sleep(for: .milliseconds(500))
-            await run(session: session)
+            // OASIS_QUIT_TEST only opens the page and quits, to check a clean shutdown.
+            if environment["OASIS_QUIT_TEST"] == nil { await run(session: session) }
+            FileHandle.standardError.write(Data("Oasis checks: quitting (tab loaded: \(tab.url?.absoluteString ?? "nil"))\n".utf8))
             NSApp.terminate(nil)
         }
     }
@@ -174,14 +176,65 @@ import CefKit
         } catch { return (false, "\(error.localizedDescription) preflight=\(CGPreflightScreenCaptureAccess())") }
     }
 
+    private static func waitForLoad(_ tab: BrowserTab, host: String) async {
+        for _ in 0..<150 {
+            try? await Task.sleep(for: .milliseconds(100))
+            if !tab.isLoading, tab.url?.host == host, (try? await tab.chromium?.evaluate("document.readyState === 'complete'")) as? Bool == true { break }
+        }
+        try? await Task.sleep(for: .milliseconds(300))
+    }
+
+    /// Spoof Mode follows the website, like Prism's site rules.
+    static func perSiteChecks(session: BrowserSession, tab: BrowserTab, checks: inout [String: Bool], diagnostics: inout [String: String]) async {
+        guard let engine = tab.chromium, let page = tab.url, let host = page.host else { return }
+        let library = session.library
+        library.spoofSites = []
+        await engine.waitForConfiguration(); await waitForLoad(tab, host: host)
+        func state() async -> String {
+            (try? await engine.evaluate("JSON.stringify({active: !!window.__oasisActivityPrivacy_v2, marker: !!window.__oasisMarker, initial: window.__initial?.active ?? null, windows: navigator.userAgent.includes('Windows NT')})") as? String) ?? "nil"
+        }
+        // Turning it on for this website applies it and reloads the page.
+        _ = try? await engine.evaluate("window.__oasisMarker = true")
+        library.toggleSpoof(for: page)
+        await engine.waitForConfiguration(); await waitForLoad(tab, host: host)
+        let on = await state()
+        checks["perSiteEnableReloads"] = tab.spoofActive && on.contains("\"active\":true") && on.contains("\"marker\":false") && on.contains("\"initial\":true")
+        // Another website is not affected; returning applies it again from document start.
+        tab.load(URL(string: "http://localhost:8794/frame")!)
+        await waitForLoad(tab, host: "localhost")
+        let other = await state()
+        tab.load(page)
+        await waitForLoad(tab, host: host)
+        let back = await state()
+        checks["perSiteFollowsNavigation"] = other.contains("\"active\":false") && other.contains("\"windows\":false") &&
+            back.contains("\"active\":true") && back.contains("\"initial\":true") && back.contains("\"windows\":true") && tab.spoofActive
+        // A newly opened tab on a selected website is covered from its first script.
+        let fresh = session.newTab(url: page)
+        await waitForLoad(fresh, host: host)
+        let freshState = (try? await fresh.chromium?.evaluate("JSON.stringify(window.__initial)") as? String) ?? "nil"
+        checks["newTabCoveredFromStart"] = freshState.contains("\"active\":true") && freshState.contains("Windows NT")
+        session.closeTab(fresh.id); session.select(tab.id)
+        // Turning it off reloads the page without Spoof Mode.
+        _ = try? await engine.evaluate("window.__oasisMarker = true")
+        library.toggleSpoof(for: page)
+        await engine.waitForConfiguration(); await waitForLoad(tab, host: host)
+        let off = await state()
+        checks["perSiteDisableReloads"] = !tab.spoofActive && off.contains("\"active\":false") && off.contains("\"marker\":false") && off.contains("\"windows\":false")
+        diagnostics["perSite"] = "on=\(on) other=\(other) back=\(back) fresh=\(freshState) off=\(off)"
+    }
+
     static func run(session: BrowserSession) async {
         guard let tab = session.selectedTab, let engine = tab.chromium, let browser = engine.browser else { return }
         var checks: [String: Bool] = [:]
         var detail = ""
         var diagnostics: [String: String] = [:]
-        let originalSpoof = session.library.spoofModeEnabled
+        let originalSpoof = tab.spoofActive
         let originalSettings = engine.spoofSettings
         let defaults = SpoofSettings()
+        // The fixture website is selected, so navigations keep Spoof Mode on.
+        if let host = tab.url?.host { session.library.spoofSites = [SpoofSite(host: host)] }
+        await engine.waitForConfiguration()
+        if let host = tab.url?.host { await waitForLoad(tab, host: host) }
         do {
             let version = try await browser.devTools("Browser.getVersion")
             checks["chromiumRuntime"] = (version["product"] as? String)?.contains("156.") == true
@@ -335,9 +388,10 @@ import CefKit
                 _ = try await engine.sharing.receive(["action": "begin"], enabled: false)
                 checks["sharingDisabledWithoutSpoof"] = false
             } catch { checks["sharingDisabledWithoutSpoof"] = true }
+            await perSiteChecks(session: session, tab: tab, checks: &checks, diagnostics: &diagnostics)
         } catch { detail = error.localizedDescription }
         engine.setSpoof(originalSpoof, settings: originalSettings); await engine.waitForConfiguration()
-        let passed = checks.count >= 20 && checks.values.allSatisfy { $0 } && detail.isEmpty
+        let passed = checks.count >= 24 && checks.values.allSatisfy { $0 } && detail.isEmpty
         let report: [String: Any] = ["passed": passed, "checks": checks, "error": detail, "diagnostics": diagnostics]
         let output = ProcessInfo.processInfo.environment["OASIS_CHROMIUM_CHECKS_OUTPUT"].map { URL(fileURLWithPath: $0) }
             ?? FileManager.default.temporaryDirectory.appendingPathComponent("oasis-chromium-checks.json")
