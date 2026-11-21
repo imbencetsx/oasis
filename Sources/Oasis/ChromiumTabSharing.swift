@@ -360,6 +360,35 @@ import CefKit
     var cursorStats = CursorStats()
     #endif
 
+    func restoreCursorIfReturning() {
+        guard isSharing, !FullscreenTransitions.isSettling(engine?.host.window),
+              !FullscreenTransitions.isSettling(engine?.tab?.session?.window),
+              let engine, ScreenRecordingDetector.isRecordingActive(for: engine.tab),
+              engine.spoofSettings.screenshareCursor,
+              let tab = engine.tab, tab.session?.selectedID == tab.id,
+              tab.session?.showsNewTabSearch != true, !tab.showsReader,
+              NSApp.isActive, let window = engine.host.window,
+              window !== engine.captureWindow, window.isKeyWindow, window.isVisible,
+              window.attachedSheet == nil, window.isOnActiveSpace, !window.isMiniaturized,
+              !engine.host.isHiddenOrHasHiddenAncestor,
+              wasAway, let lastPoint = lastInsideScreenPoint else { return }
+        wasAway = false
+        parkedPoint = nil
+        if let primary = NSScreen.screens.first {
+            CGWarpMouseCursorPosition(CGPoint(x: lastPoint.x, y: primary.frame.maxY - lastPoint.y))
+            #if DEBUG
+            cursorStats.warps += 1; cursorStats.lastWarp = lastPoint
+            #endif
+        }
+    }
+
+    func updateCursorTracking() {
+        guard isSharing, !FullscreenTransitions.isSettling(engine?.host.window),
+              !FullscreenTransitions.isSettling(engine?.tab?.session?.window),
+              let engine, ScreenRecordingDetector.isRecordingActive(for: engine.tab) else { return }
+        updateCursor(engine.host)
+    }
+
     private func updateCursor(_ host: ChromiumPageHost) {
         #if DEBUG
         cursorStats.updates += 1
@@ -388,8 +417,9 @@ import CefKit
             // The Dock, the menu bar, the fullscreen title bar and other windows can
             // cover the page (especially in fullscreen); the pointer is then not on it.
             let topmost = NSWindow.windowNumber(at: mouseLocation, belowWindowWithWindowNumber: 0)
+            let isOurWindow = (topmost == window.windowNumber || window.childWindows?.contains(where: { $0.windowNumber == topmost }) == true)
             exitPoint = CGPoint(x: (point.x - frame.minX) * cssPerPoint, y: (point.y - frame.minY) * cssPerPoint)
-            if NSApp.isActive, window.isKeyWindow, window.attachedSheet == nil, topmost == window.windowNumber,
+            if NSApp.isActive, window.isKeyWindow, window.attachedSheet == nil, isOurWindow,
                frame.contains(point), host.visibleRect.contains(point), let root = window.contentView {
                 let rootPoint = root.superview?.convert(point, from: host) ?? host.convert(point, to: nil)
                 if let hit = root.hitTest(rootPoint), hit === host || hit.isDescendant(of: host) { inside = true }
