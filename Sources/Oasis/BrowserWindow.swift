@@ -224,6 +224,8 @@ struct BrowserViewport: View {
 
 struct BrowserChrome: View {
   @Bindable var session: BrowserSession
+  @Environment(\.openSettings) private var openSettings
+  @AppStorage(SettingsSection.preferenceKey) private var settingsSection = SettingsSection.general
   var body: some View {
     GlassEffectContainer(spacing: 10) {
       HStack(spacing: 12) {
@@ -296,19 +298,22 @@ struct BrowserChrome: View {
           }
           GlassChrome {
             Toggle(isOn: Binding(
-              get: { session.library.spoofModeEnabled },
-              set: { session.library.spoofModeEnabled = $0 }
+              get: { spoofActive },
+              set: { _ in toggleSpoofForCurrentSite() }
             )) {
-              Image(systemName: session.library.spoofModeEnabled ? "theatermasks.fill" : "theatermasks")
+              Image(systemName: spoofActive ? "theatermasks.fill" : "theatermasks")
                 .font(.system(size: 15)).foregroundStyle(.primary)
                 .frame(width: 38, height: 38)
-                .background(.primary.opacity(session.library.spoofModeEnabled ? 0.12 : 0), in: Capsule())
+                .background(.primary.opacity(spoofActive ? 0.12 : 0), in: Capsule())
                 .contentShape(Rectangle())
             }
             .toggleStyle(.button).buttonStyle(OasisButtonStyle()).tint(.primary)
-            .help(session.library.spoofModeEnabled ? "Spoof Mode: On" : "Spoof Mode: Off")
-            .accessibilityLabel("Spoof Mode")
-            .accessibilityValue(session.library.spoofModeEnabled ? "On" : "Off")
+            .help(spoofHelp)
+            .accessibilityLabel("Spoof Mode for this website")
+            .accessibilityValue(spoofActive ? "On" : "Off")
+            .contextMenu {
+              Button("Spoof Mode Settings…", systemImage: "slider.horizontal.3") { openSpoofSettings() }
+            }
           }
           if let url = session.selectedTab?.url, !(session.selectedTab?.isBlankPage ?? true) {
             GlassChrome {
@@ -345,11 +350,13 @@ struct BrowserChrome: View {
                 session.selectedTab?.isBlankPage ?? true)
               Divider()
               Toggle(
-                "Spoof Mode",
+                "Spoof Mode for This Website",
                 isOn: Binding(
-                  get: { session.library.spoofModeEnabled },
-                  set: { session.library.spoofModeEnabled = $0 }
+                  get: { spoofActive },
+                  set: { _ in toggleSpoofForCurrentSite() }
                 ))
+                .disabled(SpoofSite.host(of: session.selectedTab?.url) == nil || session.selectedTab?.isBlankPage != false)
+              Button("Spoof Mode Settings…") { openSpoofSettings() }
               SettingsLink()
             } label: {
               Image(systemName: "ellipsis").font(.system(size: 17)).foregroundStyle(.primary)
@@ -363,6 +370,25 @@ struct BrowserChrome: View {
         }.frame(width: 230, alignment: .trailing)
       }
     }
+  }
+}
+
+extension BrowserChrome {
+  /// Spoof Mode applies per website, as in Prism: on means the selected tab's
+  /// website is in the list.
+  fileprivate var spoofActive: Bool { session.selectedTab?.spoofActive == true }
+  fileprivate var spoofHelp: String {
+    let host = session.selectedTab?.isBlankPage == false ? SpoofSite.host(of: session.selectedTab?.url) : nil
+    guard let host else { return "Spoof Mode: open a website to turn it on for that site · Right-click for settings" }
+    return "Spoof Mode for \(host): \(spoofActive ? "On" : "Off") · Right-click for settings"
+  }
+  fileprivate func toggleSpoofForCurrentSite() {
+    let url = session.selectedTab?.isBlankPage == false ? session.selectedTab?.url : nil
+    if let message = session.library.toggleSpoof(for: url) { session.notice = message }
+  }
+  fileprivate func openSpoofSettings() {
+    settingsSection = .spoof
+    openSettings()
   }
 }
 
@@ -586,9 +612,16 @@ final class CloseObserverView: NSView {
     super.init(frame: .zero)
   }
   required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+  /// The buttons slide away with the sidebar. In fullscreen, macOS shows them
+  /// in its own title bar when the pointer reaches the top edge, so they must
+  /// stay in place there regardless of the sidebar.
+  private var buttonsVisible: Bool {
+    showsSidebar || window?.styleMask.contains(.fullScreen) == true || inFullscreenTransition
+  }
+  private var inFullscreenTransition = false
   func configureTrafficLights(showsSidebar: Bool, reduceMotion: Bool) {
     self.showsSidebar = showsSidebar
-    trafficLights?.update(visible: showsSidebar, animated: !reduceMotion)
+    trafficLights?.update(visible: buttonsVisible, animated: !reduceMotion)
   }
   override func viewDidMoveToWindow() {
     super.viewDidMoveToWindow()
@@ -607,7 +640,7 @@ final class CloseObserverView: NSView {
       self.onFullscreenChange(window.styleMask.contains(.fullScreen))
     }
     trafficLights = WindowTrafficLights(window: window)
-    trafficLights?.update(visible: showsSidebar, animated: false)
+    trafficLights?.update(visible: buttonsVisible, animated: false)
     observers.append(NotificationCenter.default.addObserver(
       forName: NSWindow.willCloseNotification, object: window, queue: .main
     ) { [weak self] _ in MainActor.assumeIsolated { self?.onClose() } })
@@ -617,11 +650,18 @@ final class CloseObserverView: NSView {
         MainActor.assumeIsolated { self?.onFullscreenChange(fullscreen) }
       })
     }
-    for name in [NSWindow.didResizeNotification, NSWindow.didEnterFullScreenNotification, NSWindow.didExitFullScreenNotification] {
+    for (name, transition) in [(NSWindow.willEnterFullScreenNotification, true), (NSWindow.willExitFullScreenNotification, true),
+                               (NSWindow.didEnterFullScreenNotification, false), (NSWindow.didExitFullScreenNotification, false)] {
+      observers.append(NotificationCenter.default.addObserver(forName: name, object: window, queue: .main) { [weak self] _ in
+        MainActor.assumeIsolated { self?.inFullscreenTransition = transition }
+      })
+    }
+    for name in [NSWindow.didResizeNotification, NSWindow.willEnterFullScreenNotification, NSWindow.didEnterFullScreenNotification,
+                 NSWindow.willExitFullScreenNotification, NSWindow.didExitFullScreenNotification] {
       observers.append(NotificationCenter.default.addObserver(forName: name, object: window, queue: .main) { [weak self] _ in
         MainActor.assumeIsolated {
           guard let self else { return }
-          self.trafficLights?.update(visible: self.showsSidebar, animated: false, force: true)
+          self.trafficLights?.update(visible: self.buttonsVisible, animated: false, force: true)
         }
       })
     }

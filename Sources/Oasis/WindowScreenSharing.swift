@@ -8,7 +8,10 @@ import WebKit
         if (w.HTMLCanvasElement.prototype.captureStream) {
           // Scope the metadata to tracks produced by this bridge. Prototype calls
           // and native MediaStream.clone() must see the same identity as direct calls.
-          const sharedTracks = new WeakMap();
+          // Tracks outlive a settings change, so their records live on the window.
+          if (!Object.hasOwn(w, '__oasisSharedTracks'))
+            Object.defineProperty(w, '__oasisSharedTracks', { value: new WeakMap(), configurable: true });
+          const sharedTracks = w.__oasisSharedTracks;
           const trackProto = w.MediaStreamTrack.prototype;
           const nativeSettings = trackProto.getSettings;
           const nativeCapabilities = trackProto.getCapabilities;
@@ -23,16 +26,16 @@ import WebKit
           }});
           patch(trackProto, 'getCapabilities', { writable: true, value: function getCapabilities() {
             const capabilities = nativeCapabilities.call(this), sharing = sharedTracks.get(this);
-            return sharing ? {...capabilities, displaySurface: 'monitor', logicalSurface: true,
+            return sharing ? {...capabilities, displaySurface: sharing.settings.displaySurface, logicalSurface: true,
               cursor: ['always'], deviceId: sharing.settings.deviceId} : capabilities;
           }});
           patch(trackProto, 'getConstraints', { writable: true, value: function getConstraints() {
-            const constraints = nativeConstraints.call(this);
-            return sharedTracks.has(this) ? {...constraints, displaySurface: 'monitor',
+            const constraints = nativeConstraints.call(this), sharing = sharedTracks.get(this);
+            return sharing ? {...constraints, displaySurface: sharing.settings.displaySurface,
               logicalSurface: true, cursor: 'always'} : constraints;
           }});
           if (nativeLabel?.get) patch(trackProto, 'label', { get: function() {
-            return sharedTracks.has(this) ? 'Screen 1' : nativeLabel.get.call(this);
+            return sharedTracks.get(this)?.label ?? nativeLabel.get.call(this);
           }});
           patch(trackProto, 'clone', { writable: true, value: function clone() {
             const result = nativeClone.call(this), sharing = sharedTracks.get(this);
@@ -83,7 +86,6 @@ import WebKit
               if (stopped) return;
               stopped = true;
               w.clearTimeout(timer);
-              cleanups.delete(finish);
               sharingStops.delete(info.token);
               for (const activeTrack of tracks) {
                 nativeStop.call(activeTrack);
@@ -93,10 +95,19 @@ import WebKit
               bridge.postMessage({action: 'end', token: info.token}).catch(() => {});
               canvas.width = canvas.height = 0;
             };
-            cleanups.add(finish);
             sharingStops.set(info.token, finish);
             let cursorImage = null, cursorURL = '';
-            let cachedImage = null, cachedCursor = null;
+            let cachedImage = null, cachedCursor = null, cachedCrop = null;
+            // A frame can carry the fraction of it the page occupies; draw only that part.
+            const drawFrame = () => {
+              const [width, height] = cachedCrop ?? [1, 1];
+              if (width >= 0.999 && height >= 0.999) {
+                context.drawImage(cachedImage, 0, 0, canvas.width, canvas.height);
+              } else {
+                context.drawImage(cachedImage, 0, 0, cachedImage.naturalWidth * width, cachedImage.naturalHeight * height,
+                                  0, 0, canvas.width, canvas.height);
+              }
+            };
             const drawCursor = () => {
               if (cachedCursor && cursorImage && !stopped) {
                 context.drawImage(cursorImage, cachedCursor.x, cachedCursor.y, cachedCursor.width, cachedCursor.height);
@@ -110,31 +121,29 @@ import WebKit
               // Keep the canvas's last image and retry smoothly.
               if (frame?.retry) {
                 if (cachedImage && !stopped) {
-                  context.drawImage(cachedImage, 0, 0, canvas.width, canvas.height);
+                  drawFrame();
                   drawCursor();
                   return true;
                 }
                 return false;
               }
               if (frame?.same) {
-                if (cachedImage && !stopped) {
-                  context.drawImage(cachedImage, 0, 0, canvas.width, canvas.height);
-                }
+                if (cachedImage && !stopped) drawFrame();
               } else {
                 const image = new w.Image();
                 image.src = typeof frame === 'string' ? frame : frame.image;
                 await image.decode();
                 if (stopped) return false;
                 cachedImage = image;
-                context.drawImage(image, 0, 0, canvas.width, canvas.height);
+                cachedCrop = Array.isArray(frame?.crop) ? frame.crop : null;
+                drawFrame();
               }
-              // Overlay cursor
-              if (frame?.cursor) {
-                cachedCursor = frame.cursor;
-                if (cachedCursor.image !== cursorURL) {
-                  cursorImage = new w.Image(); cursorImage.src = cachedCursor.image;
-                  await cursorImage.decode(); cursorURL = cachedCursor.image;
-                }
+              // Overlay cursor; without one (cursor containment off and the
+              // pointer outside the page) nothing is drawn.
+              cachedCursor = frame?.cursor ?? (typeof frame === 'string' ? cachedCursor : null);
+              if (cachedCursor && cachedCursor.image !== cursorURL) {
+                cursorImage = new w.Image(); cursorImage.src = cachedCursor.image;
+                await cursorImage.decode(); cursorURL = cachedCursor.image;
               }
               drawCursor();
               return !stopped;
@@ -144,9 +153,14 @@ import WebKit
               if (stopped) throw new w.DOMException('Tab sharing has ended.', 'AbortError');
               stream = canvas.captureStream(60);
               track = stream.getVideoTracks()[0];
+              // Spoof Mode reports the share as the surface chosen in the share sheet.
+              const surface = info.surface === 'browser' ? 'browser' : 'monitor';
               const sharing = {
                 tracks, finish,
-                settings: {displaySurface: 'monitor', logicalSurface: true, cursor: 'always',
+                label: surface === 'browser'
+                  ? 'web-contents-media-stream://' + Math.floor(Math.random() * 900 + 100) + ':' + Math.floor(Math.random() * 9 + 1)
+                  : 'screen:0:0',
+                settings: {displaySurface: surface, logicalSurface: true, cursor: 'always',
                   deviceId: w.crypto.randomUUID(), screenPixelRatio: w.devicePixelRatio || 1},
                 add(value) { tracks.add(value); sharedTracks.set(value, sharing); }
               };
@@ -237,15 +251,9 @@ import WebKit
             requesting = true
             defer { requesting = false }
             let requestGeneration = generation
-            let alert = NSAlert()
-            alert.messageText = "Share this tab with \(message.frameInfo.securityOrigin.host)?"
-            alert.informativeText = "Only this tab's website will be shared, without browser controls. The cursor stays at its last page position when you leave the tab. Opening or switching tabs won't change the shared page. Stop from the Sharing menu in the macOS menu bar. Available only in Spoof Mode."
-            alert.addButton(withTitle: "Don't Allow")
-            alert.addButton(withTitle: "Share Tab")
-            let response = await withCheckedContinuation { continuation in
-                alert.beginSheetModal(for: window) { continuation.resume(returning: $0) }
-            }
-            guard response == .alertSecondButtonReturn, enabled, generation == requestGeneration else {
+            let surface = await ShareConsent.ask(host: message.frameInfo.securityOrigin.host, window: window,
+                                                 reportAs: true, offersScreens: false)?.surface
+            guard let surface, enabled, generation == requestGeneration else {
                 throw ShareError.message("Tab sharing was cancelled.")
             }
             let source = try WebViewCaptureSource(webView: webView)
@@ -262,7 +270,7 @@ import WebKit
             stopItem.target = self
             item.menu = menu
             statusItem = item
-            return ["token": token, "width": source.framing.width, "height": source.framing.height]
+            return ["token": token, "width": source.framing.width, "height": source.framing.height, "surface": surface]
         }
         if action == "frame", token == nil || body["token"] != token { return ["ended": true] }
         guard let token, body["token"] == token else { throw ShareError.message("Tab sharing has ended.") }
@@ -336,5 +344,113 @@ import WebKit
         guard clients.keyEnumerator().allObjects.isEmpty, let controller else { return }
         controller.removeScriptMessageHandler(forName: "oasisWindowShare", contentWorld: .page)
         objc_setAssociatedObject(controller, &Self.associationKey, nil, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+    }
+}
+
+/// What the user chose to share, and what the website is told it is.
+struct ShareChoice: Sendable, Equatable {
+    /// nil shares the requesting tab; otherwise the entire display.
+    var display: CGDirectDisplayID?
+    /// The reported display surface: "monitor" or "browser".
+    var surface: String
+}
+
+/// The share confirmation sheet: share this tab or an entire screen and, in
+/// Spoof Mode, report it to the website as a full screen or a single tab
+/// (Prism's "Report to website as").
+@MainActor enum ShareConsent {
+    static let reportAsKey = "spoofShareReportAs"
+
+    #if DEBUG
+    /// Automated checks answer the sheet without showing it.
+    static var automaticAnswer: ShareChoice?
+    #endif
+
+    static func ask(host: String, window: NSWindow, reportAs: Bool, offersScreens: Bool) async -> ShareChoice? {
+        #if DEBUG
+        if let automaticAnswer { return automaticAnswer }
+        #endif
+        let displays = offersScreens ? DisplayCapture.displays : []
+        let alert = NSAlert()
+        alert.messageText = "Share with \(host)?"
+        alert.informativeText = displays.isEmpty
+            ? "Only this tab's website will be shared, without browser controls. Switching tabs won't change the shared page. Stop from the Sharing menu in the macOS menu bar."
+            : "This tab shares only its website, without browser controls. Entire screen shares everything on that display, including the pointer, and needs Screen Recording permission. Stop from the Sharing menu in the macOS menu bar."
+        alert.addButton(withTitle: "Don't Allow")
+        alert.addButton(withTitle: "Share")
+        let form = ShareForm(displays: displays, reportAs: reportAs,
+                             rememberedSurface: UserDefaults.standard.string(forKey: reportAsKey))
+        alert.accessoryView = form.view
+        let response = await withCheckedContinuation { continuation in
+            alert.beginSheetModal(for: window) { continuation.resume(returning: $0) }
+        }
+        guard response == .alertSecondButtonReturn else { return nil }
+        let choice = form.choice
+        if reportAs { UserDefaults.standard.set(choice.surface, forKey: reportAsKey) }
+        return choice
+    }
+}
+
+/// The sheet's controls. Report-as follows the shared target until the user
+/// picks it explicitly, as in Prism.
+@MainActor private final class ShareForm: NSObject {
+    let view: NSView
+    private let target: NSPopUpButton?
+    private let report: NSPopUpButton?
+    private let displays: [DisplayCapture.Display]
+    private let rememberedSurface: String?
+    private var reportChosen = false
+
+    init(displays: [DisplayCapture.Display], reportAs: Bool, rememberedSurface: String?) {
+        self.displays = displays
+        self.rememberedSurface = rememberedSurface
+        var rows: [(String, NSPopUpButton)] = []
+        if displays.isEmpty { target = nil } else {
+            let popup = NSPopUpButton(frame: .zero, pullsDown: false)
+            popup.addItem(withTitle: "This tab")
+            for display in displays {
+                popup.addItem(withTitle: displays.count == 1 ? "Entire screen" : "Entire screen — \(display.name)")
+            }
+            rows.append(("Share:", popup))
+            target = popup
+        }
+        if reportAs {
+            let popup = NSPopUpButton(frame: .zero, pullsDown: false)
+            popup.addItems(withTitles: ["Full screen", "Single tab"])
+            popup.selectItem(at: rememberedSurface == "browser" ? 1 : 0)
+            rows.append(("Report to website as:", popup))
+            report = popup
+        } else { report = nil }
+        let width: CGFloat = 320, rowHeight: CGFloat = 30
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: width, height: CGFloat(rows.count) * rowHeight))
+        for (index, (title, popup)) in rows.enumerated() {
+            let y = CGFloat(rows.count - 1 - index) * rowHeight
+            let label = NSTextField(labelWithString: title)
+            label.alignment = .right
+            label.frame = NSRect(x: 0, y: y + 6, width: 146, height: 18)
+            popup.frame = NSRect(x: 150, y: y + 1, width: width - 150, height: 26)
+            container.addSubview(label); container.addSubview(popup)
+        }
+        view = container
+        super.init()
+        target?.target = self; target?.action = #selector(targetChanged)
+        report?.target = self; report?.action = #selector(reportChanged)
+    }
+
+    @objc private func targetChanged() {
+        guard let report, !reportChosen else { return }
+        let sharesScreen = (target?.indexOfSelectedItem ?? 0) > 0
+        report.selectItem(at: sharesScreen ? 0 : (rememberedSurface == "browser" ? 1 : 0))
+    }
+
+    @objc private func reportChanged() { reportChosen = true }
+
+    var choice: ShareChoice {
+        let index = target?.indexOfSelectedItem ?? 0
+        let display = index > 0 && index <= displays.count ? displays[index - 1].id : nil
+        let surface: String
+        if let report { surface = report.indexOfSelectedItem == 1 ? "browser" : "monitor" }
+        else { surface = display == nil ? "browser" : "monitor" }
+        return ShareChoice(display: display, surface: surface)
     }
 }

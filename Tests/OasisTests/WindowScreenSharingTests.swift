@@ -116,7 +116,7 @@ import WebKit
             mode = 'ended';
             await pending.shift()();
             return recovered && track.readyState === 'ended' && ended === 1 && trackEnds === 1 &&
-              pending.length === 0 && cleanups.size === 0;
+              pending.length === 0 && sharingStops.size === 0;
             """, arguments: [:], in: nil, contentWorld: .page) as? Bool
         #expect(result == true)
     }
@@ -247,28 +247,81 @@ import WebKit
             const streamClone = stream.clone().clone();
             const clonedTrack = streamClone.getVideoTracks()[0];
             const metadata = [track, clone, clonedTrack].every(value =>
-              value.label === 'Screen 1' && value.getSettings().displaySurface === 'monitor' &&
+              value.label === 'screen:0:0' && value.getSettings().displaySurface === 'monitor' &&
               value.getSettings().deviceId === settings.deviceId &&
               value.getCapabilities().displaySurface === 'monitor' &&
               value.getConstraints().displaySurface === 'monitor' &&
               MediaStreamTrack.prototype.getSettings.call(value).displaySurface === 'monitor');
             const unrelated = fixture.captureStream().getVideoTracks()[0];
-            const isolated = unrelated.getSettings().displaySurface !== 'monitor' && unrelated.label !== 'Screen 1';
+            const isolated = unrelated.getSettings().displaySurface !== 'monitor' && unrelated.label !== 'screen:0:0';
             unrelated.stop();
             const live = track.readyState === 'live' && stream.getAudioTracks().length === 0;
             track.stop(); track.stop();
             const clonesRemainLive = clone.readyState === 'live' && clonedTrack.readyState === 'live' &&
               !calls.includes('end');
             // Native Stop Sharing / mode restoration must stop every remaining clone.
-            for (const cleanup of [...cleanups]) cleanup();
+            for (const stop of [...sharingStops.values()]) stop();
             return live && settings.displaySurface === 'monitor' && settings.width === 64 &&
               metadata && isolated && clonesRemainLive && settings.screenPixelRatio === 2 &&
               supported.displaySurface === true && supported.logicalSurface === true && supported.cursor === true &&
               settings.cursor === 'always' && capabilities.logicalSurface === true && capabilities.cursor.join(',') === 'always' &&
               constraints.cursor === 'always' && clonedTrack.readyState === 'ended' && clone.readyState === 'ended' &&
-              track.readyState === 'ended' && cleanups.size === 0 &&
+              track.readyState === 'ended' && sharingStops.size === 0 &&
               calls.filter(action => action === 'begin').length === 1 &&
               calls.filter(action => action === 'end').length === 1;
+            """, arguments: [:], in: nil, contentWorld: .page) as? Bool
+        #expect(result == true)
+    }
+
+    @Test func jpegFrameSizeIsReadFromTheHeader() throws {
+        let bitmap = try #require(NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 37, pixelsHigh: 21, bitsPerSample: 8,
+            samplesPerPixel: 3, hasAlpha: false, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0))
+        let jpeg = try #require(bitmap.representation(using: .jpeg, properties: [.compressionFactor: 0.7]))
+        #expect(ChromiumTabSharing.jpegSize(base64: jpeg.base64EncodedString()) == CGSize(width: 37, height: 21))
+        #expect(ChromiumTabSharing.jpegSize(base64: Data("not a jpeg".utf8).base64EncodedString()) == nil)
+    }
+
+    @Test func lockedFramesAreCroppedToThePage() async throws {
+        let tab = try await loadedTab()
+        defer { tab.close() }
+        // Under the fullscreen lock the page fills only the top-left part of a
+        // frame. The shared canvas must show that part, scaled to fill it.
+        let result = try await tab.webView.callAsyncJavaScript("""
+            const d = document, sharingStops = new Map(), pending = [];
+            const fixture = d.createElement('canvas');
+            fixture.width = 200; fixture.height = 100;
+            const draw = fixture.getContext('2d');
+            draw.fillStyle = 'rgb(0,0,255)'; draw.fillRect(0, 0, 200, 100);
+            draw.fillStyle = 'rgb(255,0,0)'; draw.fillRect(0, 0, 100, 50);
+            const image = fixture.toDataURL('image/png');
+            const bridge = {postMessage: async body => {
+              if (body.action === 'begin') return {token: 'fixture', width: 64, height: 32, surface: 'browser'};
+              if (body.action === 'end') return true;
+              return {image, crop: [0.5, 0.5], cursor: null};
+            }};
+            const w = {
+              navigator: {mediaDevices: {}, userActivation: {isActive: true}},
+              HTMLCanvasElement, MediaStreamTrack, MediaStream, crypto, Image, Event, DOMException, TypeError,
+              isSecureContext: true, devicePixelRatio: 1,
+              setTimeout: callback => { pending.push(callback); return pending.length; }, clearTimeout: () => {},
+              webkit: {messageHandlers: {oasisWindowShare: bridge}}
+            };
+            w.top = w;
+            const created = [];
+            const createElement = d.createElement.bind(d);
+            d.createElement = name => { const element = createElement(name); created.push(element); return element; };
+            const patch = (object, name, descriptor) => Object.defineProperty(object, name, {...descriptor, configurable: true});
+            \(WindowScreenSharing.source)
+            const stream = await w.navigator.mediaDevices.getDisplayMedia({video: true});
+            d.createElement = createElement;
+            const track = stream.getVideoTracks()[0];
+            const canvas = created.find(element => element instanceof HTMLCanvasElement);
+            const pixels = canvas.getContext('2d').getImageData(0, 0, 64, 32).data;
+            const at = (x, y) => Array.from(pixels.slice((y * 64 + x) * 4, (y * 64 + x) * 4 + 3)).join(',');
+            const filled = at(2, 2) === '255,0,0' && at(61, 29) === '255,0,0';
+            const surface = track.getSettings().displaySurface === 'browser' && track.label.startsWith('web-contents-media-stream://');
+            for (const stop of [...sharingStops.values()]) stop();
+            return filled && surface;
             """, arguments: [:], in: nil, contentWorld: .page) as? Bool
         #expect(result == true)
     }

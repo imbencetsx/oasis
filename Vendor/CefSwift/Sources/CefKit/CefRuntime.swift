@@ -227,6 +227,12 @@ public final class CefRuntime {
         }
     }
 
+    /// Set CEFSWIFT_TRACE_SHUTDOWN to log the quit sequence to standard error.
+    static func traceShutdown(_ message: String) {
+        guard ProcessInfo.processInfo.environment["CEFSWIFT_TRACE_SHUTDOWN"] != nil else { return }
+        FileHandle.standardError.write(Data("CefSwift shutdown: \(message)\n".utf8))
+    }
+
     /// Shuts CEF down and unloads the framework. All browsers must already
     /// be closed. Call once, at process exit.
     public func shutdown() {
@@ -400,9 +406,17 @@ public final class CefRuntime {
 
     func unregisterBrowser(id: Int32) {
         browsers[id] = nil
+        Self.traceShutdown("browser \(id) closed; \(browsers.count) left; termination requested: \(isTerminationRequested)")
         if isTerminationRequested && browsers.isEmpty {
-            // Re-enter terminate:; with no browsers left it now proceeds.
-            NSApp.terminate(nil)
+            // Re-enter terminate: once this OnBeforeClose callback has returned.
+            // Shutting CEF down from inside its own callback trips a CHECK in
+            // Chromium (the app crashed on quit with tabs open).
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    Self.traceShutdown("last browser closed; terminating")
+                    NSApp.terminate(nil)
+                }
+            }
         }
     }
 
@@ -410,6 +424,7 @@ public final class CefRuntime {
     /// may terminate immediately.
     func handleTerminationRequest() -> Bool {
         guard isInitialized else { return true }
+        Self.traceShutdown("terminate requested with \(browsers.count) browsers")
         if browsers.isEmpty {
             shutdown()
             return true
@@ -418,6 +433,33 @@ public final class CefRuntime {
         for browser in Array(browsers.values) {
             browser.close(force: true)
         }
+        scheduleTerminationFallback()
         return false
+    }
+
+    /// A windowed browser closes by asking its window to close, which can fail
+    /// (for example right after a fullscreen transition); quitting then never
+    /// finished. Detach stragglers and close them again, and as a last resort
+    /// exit without CEF's shutdown, which must not run with browsers alive.
+    private func scheduleTerminationFallback() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+            MainActor.assumeIsolated {
+                let runtime = CefRuntime.shared
+                guard runtime.isTerminationRequested, !runtime.browsers.isEmpty else { return }
+                Self.traceShutdown("\(runtime.browsers.count) browsers still open after 2 s; detaching and closing again")
+                for browser in Array(runtime.browsers.values) {
+                    browser.nativeView?.removeFromSuperview()
+                    browser.close(force: true)
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+                    MainActor.assumeIsolated {
+                        guard runtime.isTerminationRequested, !runtime.browsers.isEmpty else { return }
+                        Self.traceShutdown("\(runtime.browsers.count) browsers never closed; exiting")
+                        NotificationCenter.default.post(name: NSApplication.willTerminateNotification, object: NSApp)
+                        exit(0)
+                    }
+                }
+            }
+        }
     }
 }

@@ -10,6 +10,14 @@ import CefSwiftUI
         NSWindow.allowsAutomaticWindowTabbing = false
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
+        FullscreenTransitions.install()
+        #if DEBUG
+        ChromiumIntegrationChecks.runFromEnvironmentIfRequested()
+        #endif
+    }
+    /// Also reached when CefKit has to exit without the normal termination reply.
+    func applicationWillTerminate(_ notification: Notification) {
+        BrowserLibrary.shared.flush()
     }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         AppLifecycle.isTerminating = true
@@ -23,6 +31,10 @@ import CefSwiftUI
         var config = CefConfiguration()
         config.noSandbox = false
         config.safeStorage = .keychain
+        #if DEBUG
+        // Automated engine checks run with an isolated profile and no keychain prompt.
+        if ProcessInfo.processInfo.environment["OASIS_CHROMIUM_CHECKS"] != nil { config.safeStorage = .mockKeychain }
+        #endif
         let root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("com.oasis.browser/Chromium", isDirectory: true)
         config.rootCachePath = root
@@ -97,9 +109,9 @@ struct BrowserCommands: Commands {
         CommandGroup(after: .textEditing) {
             Divider()
             Button(ClipboardTyping.shared.isTyping ? "Stop Typing Clipboard" : "Type Clipboard") {
-                ClipboardTyping.shared.toggle(spoofModeEnabled: BrowserLibrary.shared.spoofModeEnabled)
+                ClipboardTyping.shared.toggle(spoofModeEnabled: session?.selectedTab?.spoofActive == true)
             }.keyboardShortcut("9", modifiers: .command)
-                .disabled(session == nil || !BrowserLibrary.shared.spoofModeEnabled)
+                .disabled(session?.selectedTab?.spoofActive != true)
             Button("Find on Page…") { session?.showsFind = true }.keyboardShortcut("f").disabled(session?.selectedTab?.isBlankPage ?? true)
         }
         CommandGroup(after: .toolbar) {

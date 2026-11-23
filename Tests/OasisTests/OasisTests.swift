@@ -165,14 +165,14 @@ struct AddressTests {
               w.originalHasFocus = w.Document.prototype.hasFocus;
               w.originalHidden = Object.getOwnPropertyDescriptor(w.Document.prototype, 'hidden').get;
               w.boundaryEvents = 0;
-              w.addEventListener('mouseout', () => w.boundaryEvents++);
+              w.addEventListener('blur', () => w.boundaryEvents++);
             }
             """)
         for _ in 0..<3 {
             tab.setSpoofMode(true)
             let enabled = try await tab.webView.evaluateJavaScript("""
                 [window, frames[0]].every(w => {
-                  w.dispatchEvent(new w.MouseEvent('mouseout'));
+                  w.dispatchEvent(new w.Event('blur'));
                   return w.document.hasFocus() && !w.document.hidden &&
                     !!w.__oasisActivityPrivacy_v2 && w.boundaryEvents === 0;
                 })
@@ -182,7 +182,7 @@ struct AddressTests {
             tab.setSpoofMode(false)
             let restored = try await tab.webView.evaluateJavaScript("""
                 [window, frames[0]].every(w => {
-                  w.dispatchEvent(new w.MouseEvent('mouseout'));
+                  w.dispatchEvent(new w.Event('blur'));
                   const restored = w.Document.prototype.hasFocus === w.originalHasFocus &&
                     Object.getOwnPropertyDescriptor(w.Document.prototype, 'hidden').get === w.originalHidden &&
                     !Object.hasOwn(w.document, 'hidden') && !w.__oasisActivityPrivacy_v2 &&
@@ -198,35 +198,37 @@ struct AddressTests {
 
     @Test func disablingRemovesSpoofScript() {
         let controller = WKUserContentController()
-        SpoofMode.configure(controller, enabled: true)
+        let source = SpoofMode.source(SpoofSettings(), resolution: .zero)
+        SpoofMode.configure(controller, source: source)
         #expect(controller.userScripts.count == 1)
 
-        SpoofMode.configure(controller, enabled: false)
+        SpoofMode.configure(controller, source: nil)
         #expect(controller.userScripts.isEmpty)
-        SpoofMode.configure(controller, enabled: false)
+        SpoofMode.configure(controller, source: nil)
         #expect(controller.userScripts.isEmpty)
     }
 
     @Test func repeatedTogglesPreserveOtherScriptsInOrder() {
         let controller = WKUserContentController()
+        let source = SpoofMode.source(SpoofSettings(), resolution: .zero)
         let first = WKUserScript(source: "window.first = true;", injectionTime: .atDocumentStart, forMainFrameOnly: true)
         let second = WKUserScript(source: "window.second = true;", injectionTime: .atDocumentEnd, forMainFrameOnly: false)
         controller.addUserScript(first)
-        SpoofMode.configure(controller, enabled: true)
+        SpoofMode.configure(controller, source: source)
         controller.addUserScript(second)
 
         for _ in 0..<5 {
-            SpoofMode.configure(controller, enabled: false)
+            SpoofMode.configure(controller, source: nil)
             #expect(controller.userScripts.count == 2)
             #expect(controller.userScripts[0] === first)
             #expect(controller.userScripts[1] === second)
 
-            SpoofMode.configure(controller, enabled: true)
-            SpoofMode.configure(controller, enabled: true)
+            SpoofMode.configure(controller, source: source)
+            SpoofMode.configure(controller, source: source)
             #expect(controller.userScripts.count == 3)
             #expect(controller.userScripts[0] === first)
             #expect(controller.userScripts[1] === second)
-            #expect(controller.userScripts[2].source == SpoofMode.source)
+            #expect(controller.userScripts[2].source == source)
             #expect(controller.userScripts[2].injectionTime == .atDocumentStart)
             #expect(!controller.userScripts[2].isForMainFrameOnly)
         }

@@ -671,6 +671,7 @@ extension BrowserClient {
         let handler = cefAllocate(cef_request_handler_t.self, owner: self)
         handler.pointee.on_before_browse = { handlerSelf, browser, frame, request, userGesture, isRedirect in
             cefRelease(browser.map(UnsafeMutableRawPointer.init))
+            let isMainFrame = frame.map { ($0.pointee.is_main?($0) ?? 0) != 0 } ?? false
             cefRelease(frame.map(UnsafeMutableRawPointer.init))
             var urlString = ""
             if let request {
@@ -684,6 +685,9 @@ extension BrowserClient {
                 let decision = cefBrowser.delegate?.browser(
                     cefBrowser, decidePolicyForNavigation: url, isRedirect: redirect, userGesture: gesture
                 ) ?? .allow
+                if decision == .allow, isMainFrame {
+                    cefBrowser.delegate?.browser(cefBrowser, willNavigateMainFrameTo: url, isRedirect: redirect)
+                }
                 return decision == .cancel ? 1 : 0
             }
         }

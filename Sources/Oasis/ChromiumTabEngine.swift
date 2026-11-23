@@ -12,7 +12,22 @@ import SwiftUI
     private var ready = false
     private var closed = false
     private var spoofEnabled: Bool
+    /// Decides Spoof Mode for a website (the library's site rules).
+    var spoofPolicy: (@MainActor (URL?) -> Bool)?
+    /// A navigation switched Spoof Mode; check the new document once it loads.
+    private var verifyAfterLoad = false
+    private var verificationReloadURL: URL?
+    private(set) var spoofSettings: SpoofSettings
     private var scriptID: String?
+    /// The full-screen resolution the page renders at while the fullscreen lock is on.
+    private(set) var lockedResolution: CGSize?
+    private var appliedLockScale: CGFloat?
+    /// The scale the page has actually been painted at (confirmed after the override).
+    private var renderedLockScale: CGFloat?
+    private var metricsOverridden = false
+    private var captureViewportActive = false
+    /// Out-of-process iframe sessions and their installed script identifiers.
+    private var frameSessions: [String: String] = [:]
     private var configurationTask: Task<Void, Never>?
     private var mainFrameID = ""
     private var mainContexts: Set<Int> = []
@@ -22,8 +37,8 @@ import SwiftUI
     private var historyIndex = 0
     lazy var sharing = ChromiumTabSharing(engine: self)
 
-    init(tab: BrowserTab, profile: CefProfile, spoofEnabled: Bool) {
-        self.tab = tab; self.profile = profile; self.spoofEnabled = spoofEnabled
+    init(tab: BrowserTab, profile: CefProfile, spoofEnabled: Bool, settings: SpoofSettings = SpoofSettings()) {
+        self.tab = tab; self.profile = profile; self.spoofEnabled = spoofEnabled; self.spoofSettings = settings
         super.init()
         host.engine = self
     }
@@ -36,7 +51,11 @@ import SwiftUI
         options.runtimeStyle = .alloy
         options.profile = profile
         options.backgroundColor = NSColor.windowBackgroundColor
-        let startURL = requestedURL.absoluteString != "about:blank" ? requestedURL : URL(string: "about:blank")!
+        // Always start blank: the page must not begin loading before Spoof Mode's
+        // document script and identity overrides are installed (restored tabs
+        // used to load first and were only partly covered).
+        let startURL = URL(string: "about:blank")!
+        if let spoofPolicy { applyPolicyState(spoofPolicy(requestedURL)) }
         let browser = CefBrowser.createBrowser(parentView: host, bounds: host.pageBounds,
             url: startURL, options: options, delegate: self)
         self.browser = browser
@@ -51,6 +70,9 @@ import SwiftUI
                 mainFrameID = ((tree["frameTree"] as? [String: Any])?["frame"] as? [String: Any])?["id"] as? String ?? ""
                 _ = try await browser.devTools("Runtime.addBinding", params: ["name": "__oasisShareRequest"])
                 _ = try await browser.devTools("Runtime.enable")
+                // Cross-site iframes run in their own renderer. Pause each one until
+                // its Spoof Mode script is installed, as Prism does with frame sessions.
+                _ = try? await browser.devTools("Target.setAutoAttach", params: Self.autoAttach)
                 try await configureSpoof()
                 guard !closed else { return }
                 ready = true
@@ -65,20 +87,67 @@ import SwiftUI
         certificateFailedURL = nil
         requestedURL = url
         sharing.stop()
-        if ready { browser?.load(url) }
+        guard ready else {
+            if let spoofPolicy { applyPolicyState(spoofPolicy(url)) }
+            return
+        }
+        // Switch Spoof Mode before the first request when the website changes it.
+        if let spoofPolicy, spoofPolicy(url) != spoofEnabled {
+            setSpoof(spoofPolicy(url), settings: spoofSettings)
+            let configuration = configurationTask
+            Task { [weak self] in
+                await configuration?.value
+                guard let self, self.requestedURL == url else { return }
+                self.browser?.load(url)
+            }
+            return
+        }
+        browser?.load(url)
     }
 
-    func setSpoof(_ enabled: Bool) {
+    /// Records the site rules' state before the engine is configured.
+    private func applyPolicyState(_ enabled: Bool) {
+        guard enabled != spoofEnabled else { return }
         spoofEnabled = enabled
-        if !enabled { sharing.stop() }
+        tab?.spoofModeDidChange(enabled)
+    }
+
+    func setSpoof(_ enabled: Bool) { setSpoof(enabled, settings: spoofSettings) }
+    /// - Parameter reload: reload the page once the change has been applied
+    ///   successfully, so the website starts over in the new mode.
+    func setSpoof(_ enabled: Bool, settings: SpoofSettings, reload: Bool = false) {
+        let changed = enabled != spoofEnabled
+        spoofEnabled = enabled
+        spoofSettings = settings
+        if changed { tab?.spoofModeDidChange(enabled) }
+        if !enabled || !settings.screenshare { sharing.stop() }
         guard ready else { return }
-        configurationTask?.cancel()
+        // Apply changes in order; an earlier configuration may still be running.
+        let previous = configurationTask
         configurationTask = Task { [weak self] in
-            do { try await self?.configureSpoof() }
-            catch { self?.tab?.session?.notice = error.localizedDescription }
+            await previous?.value
+            guard let self else { return }
+            do {
+                try await self.configureSpoof()
+                if reload, self.spoofEnabled == enabled, let url = self.browser?.url, url.isWebURL {
+                    self.browser?.reload()
+                }
+            } catch { self.tab?.session?.notice = error.localizedDescription }
         }
     }
     func waitForConfiguration() async { await configurationTask?.value }
+
+    var spoofActive: Bool { spoofEnabled }
+    private var pageSource: String {
+        Self.shareBridge + "\n" + SpoofMode.source(spoofSettings,
+            resolution: lockedResolution ?? SpoofResolution.current(for: host.window), native: true)
+    }
+    private var identityOverride: [String: Any] {
+        (spoofEnabled ? spoofSettings.identity?.devToolsOverride : nil) ?? ["userAgent": ""]
+    }
+    /// Native focus emulation keeps blur and focus loss away from the page.
+    /// A tab share also uses it so a background shared tab keeps painting.
+    private var focusEmulated: Bool { (spoofEnabled && spoofSettings.focusVisibility) || sharing.isSharing }
 
     private func configureSpoof() async throws {
         guard let browser else { return }
@@ -86,22 +155,155 @@ import SwiftUI
             _ = try await browser.devTools("Page.removeScriptToEvaluateOnNewDocument", params: ["identifier": scriptID])
             self.scriptID = nil
         }
-        _ = try await evaluate(SpoofMode.restoreSource)
-        var identity: [String: Any] = ["userAgent": spoofEnabled ? SpoofMode.userAgent : ""]
+        _ = try await browser.devTools("Network.setUserAgentOverride", params: identityOverride)
+        await refreshFocusEmulation()
+        lockedResolution = spoofEnabled && spoofSettings.fullscreen ? SpoofResolution.current(for: host.window) : nil
+        appliedLockScale = nil
+        renderedLockScale = nil
+        host.needsLayout = true
+        host.layoutSubtreeIfNeeded()
+        try await applyViewportLock()
         if spoofEnabled {
-            identity["platform"] = "Win32"
-            identity["userAgentMetadata"] = [
-                "brands": [["brand": "Chromium", "version": "156"], ["brand": "Google Chrome", "version": "156"]],
-                "fullVersionList": [["brand": "Chromium", "version": "156.0.0.0"], ["brand": "Google Chrome", "version": "156.0.0.0"]],
-                "fullVersion": "156.0.0.0", "platform": "Windows", "platformVersion": "10.0.0",
-                "architecture": "x86", "model": "", "mobile": false, "bitness": "64", "wow64": false
-            ]
-        }
-        _ = try await browser.devTools("Network.setUserAgentOverride", params: identity)
-        if spoofEnabled {
-            let script = Self.shareBridge + "\n" + SpoofMode.source
-            let result = try await browser.devTools("Page.addScriptToEvaluateOnNewDocument", params: ["source": script, "runImmediately": true])
+            // runImmediately also replaces the script in the live document; a
+            // reinstall with new settings keeps an active tab share running.
+            let result = try await browser.devTools("Page.addScriptToEvaluateOnNewDocument", params: ["source": pageSource, "runImmediately": true])
             scriptID = result["identifier"] as? String
+        } else {
+            _ = try await evaluate(SpoofMode.restoreSource)
+        }
+        for session in Array(frameSessions.keys) { await configureFrameSession(session) }
+    }
+
+    func refreshFocusEmulation() async {
+        _ = try? await browser?.devTools("Emulation.setFocusEmulationEnabled", params: ["enabled": focusEmulated])
+    }
+
+    // MARK: Fullscreen lock
+
+    /// The page view's frame: letterboxed to the locked resolution's aspect ratio.
+    func pageFrame(in bounds: CGRect) -> CGRect {
+        guard let lockedResolution, bounds.width >= 2, bounds.height >= 2 else { return bounds }
+        return SpoofResolution.fit(lockedResolution, in: bounds).frame
+    }
+
+    private var lockScale: CGFloat? {
+        guard let lockedResolution else { return nil }
+        let bounds = host.pageBounds
+        guard bounds.width >= 2, bounds.height >= 2 else { return appliedLockScale ?? 1 }
+        return SpoofResolution.fit(lockedResolution, in: bounds).scale
+    }
+
+    /// The fraction of a screencast frame the page occupies. Under the fullscreen
+    /// lock, Chromium sizes frames to the locked resolution but paints the page
+    /// at the emulation scale in the top-left corner. This follows the scale the
+    /// page was painted at, not the live view size, which changes first.
+    var captureCrop: CGSize {
+        guard lockedResolution != nil, let scale = renderedLockScale ?? appliedLockScale else { return CGSize(width: 1, height: 1) }
+        let crop = min(1, max(0.01, scale))
+        return CGSize(width: crop, height: crop)
+    }
+
+    /// Screencast frames can lag the page's real geometry by a few hundred
+    /// milliseconds after a resize or scale change; later frames are reliable.
+    static let frameSettleTime: TimeInterval = 0.6
+
+    /// The page view changed size: frames composed around now may mix the old
+    /// and new geometry, so a shared stream skips them.
+    func pageViewDidResize() {
+        guard sharing.isSharing else { return }
+        sharing.acceptFrames(after: Date().timeIntervalSince1970 + Self.frameSettleTime)
+    }
+
+    /// Applies any pending scale change now and waits for it.
+    func settleViewport() async {
+        host.layoutSubtreeIfNeeded()
+        try? await applyViewportLock()
+    }
+
+    func viewportDidChange() {
+        guard ready, lockedResolution != nil, host.window != nil, lockScale != appliedLockScale else { return }
+        Task { [weak self] in try? await self?.applyViewportLock() }
+    }
+
+    /// The page renders at the locked resolution, scaled down to fit its view,
+    /// so its layout and metrics stay identical in and out of real fullscreen.
+    private func applyViewportLock() async throws {
+        guard let browser else { return }
+        if let lockedResolution, let scale = lockScale {
+            guard appliedLockScale != scale else { return }
+            appliedLockScale = scale
+            metricsOverridden = true
+            // A shared stream keeps its last frame until the page has painted at
+            // the new scale, so the cast never shows a zoom step.
+            let holding = sharing.isSharing
+            if holding { sharing.beginHold() }
+            #if DEBUG
+            sharing.traceLog?("scale apply \(scale) view=\(browser.nativeView?.frame.size ?? .zero)")
+            #endif
+            defer { if holding { sharing.endHold(settle: 0.05) } }
+            _ = try await browser.devTools("Emulation.setDeviceMetricsOverride", params: [
+                "width": Int(lockedResolution.width), "height": Int(lockedResolution.height),
+                "deviceScaleFactor": 0, "mobile": false, "scale": scale,
+                "screenWidth": Int(lockedResolution.width), "screenHeight": Int(lockedResolution.height)
+            ])
+            if holding {
+                // Screencast frames can arrive late. Frames swapped before the page
+                // painted at the new scale are dropped by their own timestamp.
+                let painted = try? await evaluate("""
+                    Promise.race([new Promise(r => requestAnimationFrame(() => requestAnimationFrame(() => r(Date.now())))),
+                                  new Promise(r => setTimeout(() => r(Date.now()), 200))])
+                    """) as? Double
+                sharing.acceptFrames(after: (painted ?? Date().timeIntervalSince1970 * 1000) / 1000 + Self.frameSettleTime)
+                #if DEBUG
+                sharing.traceLog?("painted at \((painted ?? 0) / 1000 - Date().timeIntervalSince1970) relative-to-now")
+                #endif
+            }
+            if appliedLockScale == scale { renderedLockScale = scale }
+            #if DEBUG
+            sharing.traceLog?("scale rendered \(scale) applied=\(appliedLockScale ?? -1)")
+            #endif
+        } else if metricsOverridden, !captureViewportActive {
+            metricsOverridden = false
+            _ = try? await browser.devTools("Emulation.clearDeviceMetricsOverride")
+        }
+    }
+
+    // MARK: Out-of-process iframes
+
+    private static let autoAttach: [String: Any] = ["autoAttach": true, "waitForDebuggerOnStart": true, "flatten": true]
+
+    private func attachedTarget(_ params: [String: Any]) {
+        guard let browser, let session = params["sessionId"] as? String,
+              let info = params["targetInfo"] as? [String: Any] else { return }
+        let waiting = params["waitingForDebugger"] as? Bool == true
+        guard info["type"] as? String == "iframe" else {
+            if waiting { browser.sendDevToolsMessage("Runtime.runIfWaitingForDebugger", params: [:], sessionID: session) }
+            return
+        }
+        frameSessions[session] = ""
+        Task { [weak self] in
+            guard let self else { return }
+            _ = try? await browser.devTools("Target.setAutoAttach", params: Self.autoAttach, sessionID: session)
+            _ = try? await browser.devTools("Page.enable", sessionID: session)
+            await configureFrameSession(session)
+            if waiting { _ = try? await browser.devTools("Runtime.runIfWaitingForDebugger", sessionID: session) }
+        }
+    }
+
+    private func configureFrameSession(_ session: String) async {
+        guard let browser, let previous = frameSessions[session] else { return }
+        if !previous.isEmpty {
+            _ = try? await browser.devTools("Page.removeScriptToEvaluateOnNewDocument", params: ["identifier": previous], sessionID: session)
+            frameSessions[session] = ""
+        }
+        _ = try? await browser.devTools("Network.setUserAgentOverride", params: identityOverride, sessionID: session)
+        _ = try? await browser.devTools("Emulation.setFocusEmulationEnabled", params: ["enabled": focusEmulated], sessionID: session)
+        if spoofEnabled {
+            let result = try? await browser.devTools("Page.addScriptToEvaluateOnNewDocument",
+                params: ["source": pageSource, "runImmediately": true], sessionID: session)
+            if frameSessions[session] != nil { frameSessions[session] = result?["identifier"] as? String ?? "" }
+        } else {
+            _ = try? await browser.devTools("Runtime.evaluate", params: ["expression": SpoofMode.restoreSource], sessionID: session)
         }
     }
 
@@ -128,7 +330,18 @@ import SwiftUI
     }
 
     private func event(_ method: String, params: [String: Any]) {
+        if params[CefBrowser.devToolsSessionKey] != nil {
+            // Child sessions: only iframe attachment bookkeeping is relevant.
+            if method == "Target.attachedToTarget" { attachedTarget(params) }
+            else if method == "Target.detachedFromTarget", let session = params["sessionId"] as? String {
+                frameSessions.removeValue(forKey: session)
+            }
+            return
+        }
         switch method {
+        case "Target.attachedToTarget": attachedTarget(params)
+        case "Target.detachedFromTarget":
+            if let session = params["sessionId"] as? String { frameSessions.removeValue(forKey: session) }
         case "Page.screencastFrame": sharing.receiveScreencastFrame(params)
         case "Runtime.executionContextCreated":
             guard let context = params["context"] as? [String: Any], let id = context["id"] as? Int,
@@ -150,7 +363,7 @@ import SwiftUI
             Task { [weak self] in
                 guard let self else { return }
                 do {
-                    let value = try await sharing.receive(request, enabled: spoofEnabled)
+                    let value = try await sharing.receive(request, enabled: spoofEnabled && spoofSettings.screenshare)
                     reply(id, value: value, error: nil, context: context)
                 } catch {
                     reply(id, value: NSNull(), error: error.localizedDescription, context: context)
@@ -211,6 +424,8 @@ import SwiftUI
     }
 
     func beginCaptureViewport() async throws -> CGSize {
+        // The fullscreen lock already keeps the page at one size across tab switches.
+        if let lockedResolution { captureViewportActive = true; return lockedResolution }
         guard let browser,
               let viewport = try await evaluate("({width:innerWidth,height:innerHeight,scale:devicePixelRatio})") as? [String: Double],
               let width = viewport["width"], let height = viewport["height"], width >= 2, height >= 2 else {
@@ -220,11 +435,15 @@ import SwiftUI
             "width": Int(width), "height": Int(height), "deviceScaleFactor": viewport["scale"] ?? 1,
             "mobile": false, "screenWidth": Int(width), "screenHeight": Int(height)
         ])
+        captureViewportActive = true
+        metricsOverridden = true
         return CGSize(width: width, height: height)
     }
 
     func endCaptureViewport() async {
-        _ = try? await browser?.devTools("Emulation.clearDeviceMetricsOverride")
+        captureViewportActive = false
+        appliedLockScale = nil
+        try? await applyViewportLock()
     }
 
     func refreshHistory() {
@@ -254,8 +473,35 @@ import SwiftUI
         tab?.session?.save()
     }
     func browser(_ b: CefBrowser, didChangeProgress progress: Double) { tab?.progress = progress }
+    func browser(_ b: CefBrowser, willNavigateMainFrameTo url: URL?, isRedirect: Bool) {
+        guard ready, let spoofPolicy, let url, url.isWebURL else { return }
+        let wanted = spoofPolicy(url)
+        guard wanted != spoofEnabled else { return }
+        // Moving to or from a selected website. The change is usually applied
+        // before the new document starts; the load is verified to be sure.
+        verifyAfterLoad = true
+        setSpoof(wanted, settings: spoofSettings)
+    }
+
+    /// After a navigation switched Spoof Mode, reload once if the document
+    /// started before the change took effect.
+    private func verifySpoofedDocument() async {
+        guard verifyAfterLoad, let browser, let url = browser.url, url.isWebURL else { return }
+        verifyAfterLoad = false
+        await configurationTask?.value
+        let expectedAgent = spoofEnabled ? spoofSettings.identity?.userAgent : nil
+        let script = "({active: !!window.\(SpoofMode.stateKey), agent: navigator.userAgent})"
+        guard let state = try? await evaluate(script) as? [String: Any] else { return }
+        let active = state["active"] as? Bool == true
+        let agentMatches = expectedAgent.map { state["agent"] as? String == $0 } ?? true
+        guard active != spoofEnabled || !agentMatches, verificationReloadURL != url else { return }
+        verificationReloadURL = url
+        browser.reload()
+    }
+
     func browser(_ b: CefBrowser, didChangeLoading loading: Bool, canGoBack: Bool, canGoForward: Bool) {
         guard ready else { return }
+        if !loading, verifyAfterLoad { Task { [weak self] in await self?.verifySpoofedDocument() } }
         tab?.isLoading = loading; tab?.canGoBack = canGoBack; tab?.canGoForward = canGoForward
         if loading { tab?.errorMessage = nil }
         else if ready {
@@ -309,7 +555,9 @@ import SwiftUI
         tab?.session?.newTab(url: url, spaceID: tab?.spaceID); return true
     }
     func browser(_ b: CefBrowser, didChangeFullscreen fullscreen: Bool) {
-        guard !spoofEnabled, let window = host.window, window.styleMask.contains(.fullScreen) != fullscreen else { return }
+        // Spoof Mode keeps reporting fullscreen; the window itself follows the
+        // page's real requests, as in a normal browser.
+        guard let window = host.window, window.styleMask.contains(.fullScreen) != fullscreen else { return }
         window.toggleFullScreen(nil)
     }
     func browser(_ b: CefBrowser, handleKeyEvent event: CefKeyEvent, isBeforePage: Bool) -> Bool {
@@ -439,6 +687,11 @@ struct ChromiumHistoryEntry: Identifiable { let id: Int; let url: URL; let title
         if window?.isVisible == true, bounds.width >= 2, bounds.height > topInset {
             lastVisibleSize = bounds.size
         }
-        if let view = engine?.browser?.nativeView { view.frame = pageBounds }
+        if let view = engine?.browser?.nativeView {
+            let frame = engine?.pageFrame(in: pageBounds) ?? pageBounds
+            if view.frame.size != frame.size { engine?.pageViewDidResize() }
+            view.frame = frame
+        }
+        engine?.viewportDidChange()
     }
 }
