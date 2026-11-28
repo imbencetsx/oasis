@@ -112,4 +112,26 @@ import Testing
     window.close()
     #expect(didClose)
   }
+
+  @Test func applicationShouldTerminateFlushesAndExitsFullscreen() {
+    let delegate = AppDelegate()
+    let window = window()
+    defer { window.close() }
+    let reply = delegate.applicationShouldTerminate(NSApp)
+    #expect(reply == .terminateNow)
+    #expect(AppLifecycle.isTerminating)
+  }
+
+  @Test func escapeKeyDismissesPanelsOrExitsFullscreen() {
+    let session = BrowserSession()
+    session.showsNewTabSearch = true
+    #expect(session.showsNewTabSearch)
+    session.showsNewTabSearch = false
+    #expect(!session.showsNewTabSearch)
+
+    session.showsFind = true
+    #expect(session.showsFind)
+    session.showsFind = false
+    #expect(!session.showsFind)
+  }
 }

@@ -13,6 +13,7 @@ struct SpoofSettings: Codable, Equatable, Hashable, Sendable {
     var selection = true
     var screenshare = true
     var screenshareCursor = true
+    var drm = true
     var osPlatform = true
     var platform = SpoofPlatform.win64
     var browserIdentity = true
@@ -33,6 +34,7 @@ struct SpoofSettings: Codable, Equatable, Hashable, Sendable {
         selection = flag(.selection)
         screenshare = flag(.screenshare)
         screenshareCursor = flag(.screenshareCursor)
+        drm = flag(.drm)
         osPlatform = flag(.osPlatform)
         browserIdentity = flag(.browserIdentity)
         platform = (try? container.decodeIfPresent(SpoofPlatform.self, forKey: .platform)).flatMap { $0 } ?? .win64
@@ -175,6 +177,22 @@ struct SpoofIdentity: Equatable, Sendable {
         return [["brand": "Chromium", "version": Self.chromiumVersion],
                 ["brand": browser == .edge ? "Microsoft Edge" : "Google Chrome", "version": Self.chromiumVersion],
                 ["brand": "Not(A:Brand", "version": "24.0.0.0"]]
+    }
+
+    /// EME key systems reported for this browser and operating system.
+    var drmKeySystems: [String] {
+        switch browser {
+        case .chrome, .firefox:
+            return ["com.widevine.alpha", "org.w3.clearkey"]
+        case .edge:
+            if platform == .win64 {
+                return ["com.widevine.alpha", "com.microsoft.playready.recommendation",
+                        "com.microsoft.playready.recommendation.3000", "com.microsoft.playready", "org.w3.clearkey"]
+            }
+            return ["com.widevine.alpha", "org.w3.clearkey"]
+        case .safari:
+            return ["com.apple.fps", "com.apple.fps.1_0", "com.apple.fps.2_0", "com.apple.fps.3_0"]
+        }
     }
 
     /// Parameters for the DevTools User-Agent override.

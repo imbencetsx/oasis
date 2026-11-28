@@ -54,7 +54,7 @@ let package = Package(
                 ),
                 permissions: [
                     .writeToPackageDirectory(reason: "Cache CEF distributions in .cef/ and write .app bundles"),
-                    .allowNetworkConnections(scope: .all(ports: []), reason: "Download CEF binaries from cef-builds.spotifycdn.com"),
+                    .allowNetworkConnections(scope: .all(ports: []), reason: "Download the CEF binaries pinned in CEF_VERSION.json"),
                 ]
             )
         ),

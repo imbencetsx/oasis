@@ -147,6 +147,11 @@ struct BrowserWindow: View {
       if let error = session.library.storageError { session.notice = error }
       installCursorTrackingMonitor(for: session)
     }
+    .onExitCommand {
+      if session.isWindowFullscreen {
+        session.window?.toggleFullScreen(nil)
+      }
+    }
   }
 }
 

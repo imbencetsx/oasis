@@ -380,6 +380,9 @@ private struct SpoofSettingsPage: View {
                 feature("Screenshare cursor containment",
                         "Keeps the cursor inside tab-only screenshares by parking it near the edge (~1cm) when moving outside.",
                         \.screenshareCursor)
+                feature("DRM capability spoofing",
+                        "Reports MediaKeySystemAccess (Widevine, PlayReady, FairPlay) matching the spoofed browser and OS.",
+                        \.drm)
             }
             Section("Identity") {
                 feature("OS & platform spoofing",

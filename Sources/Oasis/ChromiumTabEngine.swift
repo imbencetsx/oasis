@@ -152,7 +152,7 @@ import SwiftUI
     private func configureSpoof() async throws {
         guard let browser else { return }
         if let scriptID {
-            _ = try await browser.devTools("Page.removeScriptToEvaluateOnNewDocument", params: ["identifier": scriptID])
+            _ = try? await browser.devTools("Page.removeScriptToEvaluateOnNewDocument", params: ["identifier": scriptID])
             self.scriptID = nil
         }
         _ = try await browser.devTools("Network.setUserAgentOverride", params: identityOverride)
@@ -561,9 +561,22 @@ import SwiftUI
         window.toggleFullScreen(nil)
     }
     func browser(_ b: CefBrowser, handleKeyEvent event: CefKeyEvent, isBeforePage: Bool) -> Bool {
-        guard isBeforePage, event.hasCommand,
-              event.phase == .rawKeyDown || event.phase == .keyDown,
-              let native = NSApp.currentEvent else { return false }
+        guard isBeforePage else { return false }
+        if event.windowsKeyCode == 27,
+           !event.hasCommand, !event.hasControl, !event.hasOption, !event.hasShift,
+           let window = host.window ?? tab?.session?.window ?? NSApp.keyWindow,
+           window.styleMask.contains(.fullScreen) {
+            window.toggleFullScreen(nil)
+            return true
+        }
+        guard event.hasCommand,
+              event.phase == .rawKeyDown || event.phase == .keyDown else { return false }
+        if !event.hasControl, !event.hasOption,
+           event.windowsKeyCode == 81 || event.windowsKeyCode == 113 || event.character == "q" || event.character == "Q" {
+            NSApp.terminate(nil)
+            return true
+        }
+        guard let native = NSApp.currentEvent else { return false }
         return NSApp.mainMenu?.performKeyEquivalent(with: native) ?? false
     }
     func browser(_ b: CefBrowser, decidePolicyForNavigation url: URL?, isRedirect: Bool, userGesture: Bool) -> CefNavigationDecision {
