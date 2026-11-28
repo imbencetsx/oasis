@@ -429,7 +429,40 @@ public final class CefRuntime {
             shutdown()
             return true
         }
+        if isTerminationRequested {
+            for browser in Array(browsers.values) {
+                browser.close(force: true)
+            }
+            return false
+        }
         isTerminationRequested = true
+        let fullscreenWindows = NSApp.windows.filter { $0.styleMask.contains(.fullScreen) }
+        if !fullscreenWindows.isEmpty {
+            for window in fullscreenWindows {
+                NotificationCenter.default.addObserver(
+                    forName: NSWindow.didExitFullScreenNotification,
+                    object: window,
+                    queue: .main
+                ) { [weak self] _ in
+                    MainActor.assumeIsolated {
+                        guard let self, self.isTerminationRequested else { return }
+                        for browser in Array(self.browsers.values) {
+                            browser.close(force: true)
+                        }
+                    }
+                }
+                window.toggleFullScreen(nil)
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+                MainActor.assumeIsolated {
+                    guard let self, self.isTerminationRequested, !self.browsers.isEmpty else { return }
+                    for browser in Array(self.browsers.values) {
+                        browser.close(force: true)
+                    }
+                }
+            }
+            return false
+        }
         for browser in Array(browsers.values) {
             browser.close(force: true)
         }

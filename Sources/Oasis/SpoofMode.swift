@@ -21,6 +21,7 @@ enum SpoofMode {
       "keyboard": settings.keyboard, "clipboardEvents": settings.clipboardEvents,
       "rightClick": settings.rightClick, "selection": settings.selection,
       "screenshare": settings.screenshare, "screenshareCursor": settings.screenshareCursor,
+      "drm": settings.drm ? (settings.identity ?? SpoofIdentity(browser: .chrome, platform: .host)).drmKeySystems : NSNull(),
       "native": native,
       "resolution": ["width": Int(resolution.width), "height": Int(resolution.height)],
     ]
@@ -262,6 +263,191 @@ enum SpoofMode {
 
             if (opt.screenshare) {
               __OASIS_SHARING__
+            }
+
+            // EME / DRM capability spoofing: report the key systems expected for
+            // the spoofed browser and OS without requiring a bundled CDM.
+            if (Array.isArray(opt.drm) && w.Navigator?.prototype) {
+              const allowedSystems = new Set(opt.drm);
+              const filterCapabilities = list => {
+                if (list === undefined) return [];
+                if (!Array.isArray(list)) return null;
+                return list.filter(item => item && typeof item.contentType === 'string' && item.contentType.includes('/'))
+                  .map(item => ({
+                    contentType: item.contentType,
+                    robustness: typeof item.robustness === 'string' ? item.robustness : '',
+                    encryptionScheme: item.encryptionScheme ?? null
+                  }));
+              };
+              const matchConfig = configs => {
+                for (const raw of configs) {
+                  if (!raw || typeof raw !== 'object') continue;
+                  const video = filterCapabilities(raw.videoCapabilities);
+                  const audio = filterCapabilities(raw.audioCapabilities);
+                  if (video === null || audio === null) continue;
+                  if (Array.isArray(raw.videoCapabilities) && raw.videoCapabilities.length > 0 && video.length === 0) continue;
+                  if (Array.isArray(raw.audioCapabilities) && raw.audioCapabilities.length > 0 && audio.length === 0) continue;
+                  return {
+                    label: typeof raw.label === 'string' ? raw.label : '',
+                    initDataTypes: Array.isArray(raw.initDataTypes) ? raw.initDataTypes.map(String) : ['cenc'],
+                    audioCapabilities: audio,
+                    videoCapabilities: video,
+                    distinctiveIdentifier: raw.distinctiveIdentifier === 'required' ? 'required' : 'optional',
+                    persistentState: raw.persistentState === 'required' ? 'required' : 'optional',
+                    sessionTypes: Array.isArray(raw.sessionTypes) && raw.sessionTypes.length ? raw.sessionTypes.map(String) : ['temporary']
+                  };
+                }
+                return null;
+              };
+              const createSessionStub = () => {
+                const session = Object.create(w.MediaKeySession?.prototype ?? Object.prototype);
+                const statuses = new w.Map();
+                const listeners = new Map();
+                let sessionId = '';
+                let onMessage = null;
+                let onKeyStatusesChange = null;
+                let resolveClosed;
+                const closed = new w.Promise(resolve => { resolveClosed = resolve; });
+                const emit = (type, event) => {
+                  if (type === 'message' && typeof onMessage === 'function') {
+                    try { onMessage.call(session, event); } catch (_) {}
+                  } else if (type === 'keystatuseschange' && typeof onKeyStatusesChange === 'function') {
+                    try { onKeyStatusesChange.call(session, event); } catch (_) {}
+                  }
+                  for (const fn of [...(listeners.get(type) ?? [])]) {
+                    try {
+                      if (typeof fn === 'function') fn.call(session, event);
+                      else fn?.handleEvent?.(event);
+                    } catch (_) {}
+                  }
+                };
+                Object.defineProperties(session, {
+                  sessionId: { get: () => sessionId, enumerable: true },
+                  expiration: { value: NaN, enumerable: true },
+                  closed: { value: closed, enumerable: true },
+                  keyStatuses: { value: statuses, enumerable: true },
+                  onmessage: { get: () => onMessage, set: v => { onMessage = v; }, enumerable: true },
+                  onkeystatuseschange: { get: () => onKeyStatusesChange, set: v => { onKeyStatusesChange = v; }, enumerable: true },
+                  generateRequest: {
+                    writable: true,
+                    value: (initDataType, initData) => {
+                      if (!initDataType || !initData) {
+                        return w.Promise.reject(new w.TypeError('initDataType and initData are required.'));
+                      }
+                      if (!sessionId) sessionId = Math.random().toString(16).slice(2, 18).toUpperCase();
+                      const payload = new w.Uint8Array([8, 4]).buffer;
+                      const event = typeof w.MediaKeyMessageEvent === 'function'
+                        ? new w.MediaKeyMessageEvent('message', { messageType: 'license-request', message: payload })
+                        : Object.assign(new w.Event('message'), { messageType: 'license-request', message: payload });
+                      queueMicrotask(() => emit('message', event));
+                      return w.Promise.resolve();
+                    }
+                  },
+                  load: { value: () => w.Promise.resolve(false), writable: true },
+                  update: {
+                    writable: true,
+                    value: () => {
+                      statuses.set(new w.Uint8Array(16).buffer, 'usable');
+                      queueMicrotask(() => emit('keystatuseschange', new w.Event('keystatuseschange')));
+                      return w.Promise.resolve();
+                    }
+                  },
+                  close: {
+                    writable: true,
+                    value: () => {
+                      resolveClosed?.('closed-by-application');
+                      return w.Promise.resolve();
+                    }
+                  },
+                  remove: { value: () => w.Promise.resolve(), writable: true },
+                  addEventListener: {
+                    writable: true,
+                    value: (type, fn) => {
+                      if (!fn) return;
+                      let set = listeners.get(type);
+                      if (!set) { set = new Set(); listeners.set(type, set); }
+                      set.add(fn);
+                    }
+                  },
+                  removeEventListener: {
+                    writable: true,
+                    value: (type, fn) => { listeners.get(type)?.delete(fn); }
+                  },
+                  dispatchEvent: {
+                    writable: true,
+                    value: event => { emit(event.type, event); return true; }
+                  }
+                });
+                return session;
+              };
+              const stubMediaKeys = new WeakSet();
+              const elementMediaKeys = new WeakMap();
+              const createKeysStub = () => {
+                const keys = Object.create(w.MediaKeys?.prototype ?? Object.prototype);
+                Object.defineProperties(keys, {
+                  createSession: { value: () => createSessionStub(), writable: true },
+                  setServerCertificate: { value: () => w.Promise.resolve(true), writable: true }
+                });
+                stubMediaKeys.add(keys);
+                return keys;
+              };
+              const mediaProto = w.HTMLMediaElement?.prototype;
+              if (mediaProto) {
+                const nativeSetMediaKeys = mediaProto.setMediaKeys;
+                const nativeMediaKeysDesc = Object.getOwnPropertyDescriptor(mediaProto, 'mediaKeys');
+                if (typeof nativeSetMediaKeys === 'function') {
+                  patch(mediaProto, 'setMediaKeys', {
+                    writable: true,
+                    value: function setMediaKeys(keys) {
+                      if (keys && stubMediaKeys.has(keys)) {
+                        elementMediaKeys.set(this, keys);
+                        return w.Promise.resolve();
+                      }
+                      elementMediaKeys.delete(this);
+                      return nativeSetMediaKeys.call(this, keys);
+                    }
+                  });
+                }
+                if (nativeMediaKeysDesc?.get) {
+                  patch(mediaProto, 'mediaKeys', {
+                    get: function() {
+                      return elementMediaKeys.get(this) ?? nativeMediaKeysDesc.get.call(this);
+                    }
+                  });
+                }
+              }
+              const createAccessStub = (system, config) => {
+                const access = Object.create(w.MediaKeySystemAccess?.prototype ?? Object.prototype);
+                Object.defineProperties(access, {
+                  keySystem: { get: () => system, enumerable: true },
+                  getConfiguration: { value: () => structuredClone(config), writable: true },
+                  createMediaKeys: { value: () => w.Promise.resolve(createKeysStub()), writable: true }
+                });
+                return access;
+              };
+              patch(w.Navigator.prototype, 'requestMediaKeySystemAccess', {
+                writable: true,
+                value: function requestMediaKeySystemAccess(keySystem, supportedConfigurations) {
+                  if (arguments.length < 2 || typeof keySystem !== 'string' || !keySystem) {
+                    return w.Promise.reject(new w.TypeError('Failed to execute \'requestMediaKeySystemAccess\' on \'Navigator\': 2 arguments required.'));
+                  }
+                  let configs;
+                  try { configs = Array.from(supportedConfigurations); } catch (_) {
+                    return w.Promise.reject(new w.TypeError('supportedConfigurations must be a sequence.'));
+                  }
+                  if (!configs.length) {
+                    return w.Promise.reject(new w.TypeError('supportedConfigurations must not be empty.'));
+                  }
+                  if (!allowedSystems.has(keySystem)) {
+                    return w.Promise.reject(new w.DOMException('Unsupported keySystem or supportedConfigurations.', 'NotSupportedError'));
+                  }
+                  const matched = matchConfig(configs);
+                  if (!matched) {
+                    return w.Promise.reject(new w.DOMException('Unsupported keySystem or supportedConfigurations.', 'NotSupportedError'));
+                  }
+                  return w.Promise.resolve(createAccessStub(keySystem, matched));
+                }
+              });
             }
 
             function repair() {

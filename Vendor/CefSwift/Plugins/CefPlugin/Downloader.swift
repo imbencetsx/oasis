@@ -1,9 +1,9 @@
 import Foundation
 
-/// SHA-1 of a file via `/usr/bin/shasum -a 1`.
-private func sha1(of file: URL) throws -> String {
+/// SHA-1 or SHA-256 of a file via `/usr/bin/shasum`.
+private func digest(of file: URL, algorithm: String) throws -> String {
     let result = try Shell.runChecked(
-        "/usr/bin/shasum", ["-a", "1", file.path],
+        "/usr/bin/shasum", ["-a", algorithm, file.path],
         hint: "shasum is part of macOS; if this fails the downloaded file may be unreadable."
     )
     guard let hash = result.stdout.split(separator: " ").first else {
@@ -12,11 +12,22 @@ private func sha1(of file: URL) throws -> String {
     return String(hash)
 }
 
+/// The artifact's pinned digest, preferring SHA-256.
+private func expectedDigest(_ artifact: CefManifest.Artifact) -> (algorithm: String, value: String) {
+    if let sha256 = artifact.sha256 { return ("256", sha256.lowercased()) }
+    return ("1", (artifact.sha1 ?? "").lowercased())
+}
+
+private func matches(_ file: URL, _ artifact: CefManifest.Artifact) -> Bool {
+    let expected = expectedDigest(artifact)
+    return (try? digest(of: file, algorithm: expected.algorithm)) == expected.value
+}
+
 /// Downloads, verifies, extracts and prepares a pinned CEF binary distribution
 /// under `<packageRoot>/.cef/` (gitignored).
 ///
 /// Layout:
-///   .cef/downloads/<artifact name>.tar.bz2        — resumable curl target
+///   .cef/downloads/<artifact name>                — resumable curl target (.tar.bz2 or .tar.xz)
 ///   .cef/dist/<cefVersion>_<platform>_<flavor>/   — extracted distro (tar --strip-components=1)
 ///   .cef/dist/<...>/.ok                           — marker written after successful
 ///                                                   extraction + framework conversion
@@ -41,7 +52,7 @@ struct Downloader {
         FileManager.default.fileExists(atPath: dist.appendingPathComponent(".ok").path)
     }
 
-    /// Ensures the distribution is downloaded, sha1-verified, extracted and the
+    /// Ensures the distribution is downloaded, digest-verified, extracted and the
     /// framework converted to versioned layout. Idempotent: returns immediately
     /// when the `.ok` marker is present.
     @discardableResult
@@ -71,11 +82,11 @@ struct Downloader {
     }
 
     /// Downloads (or resumes) the tarball with curl. Skips when an existing
-    /// file already has the expected sha1.
+    /// file already has the expected digest.
     private func download(artifact: CefManifest.Artifact, to tarball: URL) throws {
         let fm = FileManager.default
         if fm.fileExists(atPath: tarball.path) {
-            if (try? sha1(of: tarball)) == artifact.sha1 {
+            if matches(tarball, artifact) {
                 print("[cef] Using cached download: \(tarball.lastPathComponent)")
                 return
             }
@@ -91,7 +102,7 @@ struct Downloader {
 
         // '+' must be percent-encoded in the CDN path.
         let encodedName = artifact.name.replacingOccurrences(of: "+", with: "%2B")
-        let url = "\(Self.baseURL)/\(encodedName)"
+        let url = artifact.url ?? "\(Self.baseURL)/\(encodedName)"
         print("[cef] Downloading \(url)")
         print("[cef] (\(artifact.size / 1_000_000) MB — this can take a while)")
 
@@ -104,8 +115,7 @@ struct Downloader {
         ])
         // curl exits 33 / HTTP 416 when resuming an already-complete file.
         if status != 0 {
-            if fm.fileExists(atPath: tarball.path),
-               (try? sha1(of: tarball)) == artifact.sha1 {
+            if fm.fileExists(atPath: tarball.path), matches(tarball, artifact) {
                 return
             }
             throw CefPluginError(
@@ -117,12 +127,13 @@ struct Downloader {
     }
 
     private func verify(artifact: CefManifest.Artifact, tarball: URL) throws {
-        print("[cef] Verifying sha1…")
-        let actual = try sha1(of: tarball)
-        guard actual == artifact.sha1 else {
+        let expected = expectedDigest(artifact)
+        print("[cef] Verifying sha\(expected.algorithm)…")
+        let actual = try digest(of: tarball, algorithm: expected.algorithm)
+        guard actual == expected.value else {
             try? FileManager.default.removeItem(at: tarball)
             throw CefPluginError(
-                "sha1 mismatch for \(tarball.lastPathComponent): expected \(artifact.sha1), got \(actual). " +
+                "sha\(expected.algorithm) mismatch for \(tarball.lastPathComponent): expected \(expected.value), got \(actual). " +
                 "The corrupt file was deleted — run the download again. If it keeps failing, the manifest " +
                 "(CEF_VERSION.json) may be stale; re-run Scripts/cef-update.sh."
             )
@@ -142,7 +153,7 @@ struct Downloader {
 
         print("[cef] Extracting \(tarball.lastPathComponent)…")
         let status = try Shell.runStreaming("/usr/bin/tar", [
-            "xjf", tarball.path,
+            "xf", tarball.path,          // bsdtar detects bzip2 and xz
             "-C", staging.path,
             "--strip-components", "1",   // drop the cef_binary_<…> top directory
         ])

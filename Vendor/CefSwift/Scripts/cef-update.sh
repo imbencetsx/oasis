@@ -58,6 +58,11 @@ sha1_of() { # file
 command -v curl >/dev/null 2>&1 || die "curl is required"
 command -v jq   >/dev/null 2>&1 || die "jq is required"
 [[ -f "$MANIFEST" ]] || die "manifest not found: $MANIFEST"
+# The pinned builds come from a custom URL with proprietary codecs (H.264/AAC).
+# The Spotify CDN builds lack them, so do not silently switch back.
+if [[ "${CEF_UPDATE_ALLOW_SPOTIFY:-0}" != 1 ]] && jq -e '[.platforms[][] | has("url")] | any' "$MANIFEST" >/dev/null; then
+  die "CEF_VERSION.json pins proprietary-codec builds from a custom URL; the Spotify CDN builds cannot play H.264/AAC (Twitch). Set CEF_UPDATE_ALLOW_SPOTIFY=1 to replace them anyway."
+fi
 
 # --- 1. Fetch index.json (conditional GET via ETag; ~10 MB otherwise) --------
 mkdir -p "$CACHE_DIR"

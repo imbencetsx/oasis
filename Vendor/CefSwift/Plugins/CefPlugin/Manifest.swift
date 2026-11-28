@@ -3,12 +3,15 @@ import PackagePlugin
 
 /// Decoded form of `CEF_VERSION.json`. Schema: `cef`, `chromium`, `channel`,
 /// `platforms` keyed by `macosarm64`/`macosx64`, each with `minimal`/`standard`
-/// artifacts containing `name`, `sha1`, `size`.
+/// artifacts containing `name`, `size` and a `sha1` or `sha256`. An artifact
+/// with a `url` is fetched from there instead of the Spotify CEF CDN.
 struct CefManifest: Decodable {
     struct Artifact: Decodable {
         let name: String
-        let sha1: String
+        let sha1: String?
+        let sha256: String?
         let size: Int
+        let url: String?
     }
 
     let cef: String
@@ -38,6 +41,9 @@ struct CefManifest: Decodable {
                 "Pass --flavor with one of those values."
             )
         }
+        guard artifact.sha1 != nil || artifact.sha256 != nil else {
+            throw CefPluginError("CEF_VERSION.json artifact '\(artifact.name)' has neither sha1 nor sha256.")
+        }
         return artifact
     }
 
@@ -61,7 +67,7 @@ struct CefManifest: Decodable {
         } catch {
             throw CefPluginError(
                 "Could not decode \(url.path) as a CEF manifest: \(error). " +
-                "Expected the schema: {cef, chromium, channel, platforms:{macosarm64|macosx64:{minimal|standard:{name,sha1,size}}}}."
+                "Expected the schema: {cef, chromium, channel, platforms:{macosarm64|macosx64:{minimal|standard:{name,sha1|sha256,size,url?}}}}."
             )
         }
     }

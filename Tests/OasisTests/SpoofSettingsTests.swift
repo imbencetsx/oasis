@@ -10,7 +10,7 @@ import WebKit
         let settings = try JSONDecoder().decode(SpoofSettings.self, from: partial)
         #expect(settings.keyboard == false)
         #expect(settings.focusVisibility && settings.fullscreen && settings.clipboardEvents && settings.rightClick)
-        #expect(settings.selection && settings.screenshare && settings.screenshareCursor)
+        #expect(settings.selection && settings.screenshare && settings.screenshareCursor && settings.drm)
         #expect(settings.platform == .win64)
         #expect(settings.browser == .edge)
         let roundTrip = try JSONDecoder().decode(SpoofSettings.self, from: JSONEncoder().encode(settings))
@@ -173,5 +173,75 @@ import WebKit
         tab.setSpoofMode(true, settings: settings)
         #expect(try await tab.webView.evaluateJavaScript(script) as? String == "1,1,1,1")
         #expect(try await tab.webView.evaluateJavaScript("Object.hasOwn(document, 'hidden')") as? Bool == false)
+    }
+
+    @Test func drmSpoofingMatchesBrowserAndPlatform() async throws {
+        var settings = SpoofSettings()
+        #expect(settings.identity?.drmKeySystems == ["com.widevine.alpha", "org.w3.clearkey"])
+        settings.browser = .edge
+        #expect(settings.identity?.drmKeySystems.contains("com.microsoft.playready.recommendation") == true)
+        settings.platform = .macos64
+        #expect(settings.identity?.drmKeySystems == ["com.widevine.alpha", "org.w3.clearkey"])
+        settings.browser = .safari
+        #expect(settings.identity?.drmKeySystems.contains("com.apple.fps") == true)
+
+        let tab = try await loadedTab(SpoofSettings())
+        defer { tab.close() }
+        let probe = """
+            const probe = async (system) => {
+              try {
+                const access = await navigator.requestMediaKeySystemAccess(system, [{
+                  initDataTypes: ['cenc'],
+                  videoCapabilities: [{ contentType: 'video/mp4; codecs="avc1.42E01E"' }]
+                }]);
+                const cfg = access.getConfiguration();
+                const keys = await access.createMediaKeys();
+                const session = keys.createSession();
+                const msg = await new Promise(resolve => {
+                  session.addEventListener('message', e => resolve(e.messageType));
+                  session.generateRequest('cenc', new Uint8Array([1, 2, 3, 4]));
+                });
+                await new Promise(resolve => {
+                  session.onkeystatuseschange = () => resolve();
+                  session.update(new Uint8Array([5, 6]));
+                });
+                const status = Array.from(session.keyStatuses.values())[0];
+                await session.close();
+                return access.keySystem + ':' + cfg.videoCapabilities.length + ':' + msg + ':' + status + ':' + (session.sessionId.length > 0);
+              } catch (e) {
+                return 'ERR:' + e.name;
+              }
+            };
+            return JSON.stringify({
+              widevine: await probe('com.widevine.alpha'),
+              playready: await probe('com.microsoft.playready.recommendation'),
+              fairplay: await probe('com.apple.fps')
+            });
+            """
+        func runProbe() async throws -> [String: String] {
+            let json = try #require(try await tab.webView.callAsyncJavaScript(probe, contentWorld: .page) as? String)
+            return try #require(try JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: String])
+        }
+
+        var result = try await runProbe()
+        #expect(result["widevine"] == "com.widevine.alpha:1:license-request:usable:true")
+        #expect(result["playready"] == "ERR:NotSupportedError")
+        #expect(result["fairplay"] == "ERR:NotSupportedError")
+
+        var edgeWin = SpoofSettings()
+        edgeWin.browser = .edge
+        edgeWin.platform = .win64
+        tab.setSpoofMode(true, settings: edgeWin)
+        result = try await runProbe()
+        #expect(result["widevine"] == "com.widevine.alpha:1:license-request:usable:true")
+        #expect(result["playready"] == "com.microsoft.playready.recommendation:1:license-request:usable:true")
+
+        var safariMac = SpoofSettings()
+        safariMac.browser = .safari
+        safariMac.platform = .macos64
+        tab.setSpoofMode(true, settings: safariMac)
+        result = try await runProbe()
+        #expect(result["widevine"] == "ERR:NotSupportedError")
+        #expect(result["fairplay"] == "com.apple.fps:1:license-request:usable:true")
     }
 }

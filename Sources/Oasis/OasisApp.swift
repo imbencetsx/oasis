@@ -35,8 +35,15 @@ import CefSwiftUI
         // Automated engine checks run with an isolated profile and no keychain prompt.
         if ProcessInfo.processInfo.environment["OASIS_CHROMIUM_CHECKS"] != nil { config.safeStorage = .mockKeychain }
         #endif
-        let root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        var root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("com.oasis.browser/Chromium", isDirectory: true)
+        #if DEBUG
+        // Lets a debug build run beside an open release copy without sharing its profile.
+        if let custom = ProcessInfo.processInfo.environment["OASIS_PROFILE_ROOT"] {
+            root = URL(fileURLWithPath: custom, isDirectory: true)
+            config.safeStorage = .mockKeychain
+        }
+        #endif
         config.rootCachePath = root
         config.cachePath = root.appendingPathComponent("Default", isDirectory: true)
         config.persistSessionCookies = true
@@ -83,6 +90,9 @@ struct BrowserCommands: Commands {
             }.disabled(session?.selectedTab?.chromium == nil)
         }
         #endif
+        CommandGroup(replacing: .appTermination) {
+            Button("Quit [oasis]") { NSApp.terminate(nil) }.keyboardShortcut("q", modifiers: .command)
+        }
         CommandGroup(replacing: .newItem) {
             Button("New Tab") { session?.showsNewTabSearch.toggle() }.keyboardShortcut("t").disabled(session == nil)
             Button("New Window") { openWindow(value: BrowserWindowRequest()) }.keyboardShortcut("n")
@@ -130,6 +140,11 @@ struct BrowserCommands: Commands {
             Divider()
             Button("Next Tab") { session?.cycleTab(1) }.keyboardShortcut("]", modifiers: [.command, .shift])
             Button("Previous Tab") { session?.cycleTab(-1) }.keyboardShortcut("[", modifiers: [.command, .shift])
+        }
+        CommandGroup(replacing: .windowSize) {
+            Button(session?.isWindowFullscreen == true ? "Exit Full Screen" : "Enter Full Screen") {
+                (session?.window ?? NSApp.keyWindow ?? NSApp.mainWindow)?.toggleFullScreen(nil)
+            }.keyboardShortcut("f", modifiers: [.command, .control])
         }
         CommandMenu("History") {
             Button("Back") { session?.selectedTab?.goBack() }.keyboardShortcut("[").disabled(!(session?.selectedTab?.canGoBack ?? false))

@@ -127,6 +127,13 @@ extension CefMetalHostView: NSMenuItemValidation, NSUserInterfaceValidations {
     @objc public override func selectAll(_ sender: Any?) { osrBrowser?.selectAll() }
     @objc public func undo(_ sender: Any?) { osrBrowser?.undo() }
     @objc public func redo(_ sender: Any?) { osrBrowser?.redo() }
+    @objc public override func cancelOperation(_ sender: Any?) {
+        if let window, window.styleMask.contains(.fullScreen) {
+            window.toggleFullScreen(nil)
+            return
+        }
+        super.cancelOperation(sender)
+    }
 
     // MARK: Menu / toolbar item validation
 

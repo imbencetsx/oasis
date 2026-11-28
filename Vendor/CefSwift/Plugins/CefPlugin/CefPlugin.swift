@@ -81,7 +81,7 @@ struct CefPlugin: CommandPlugin {
         let manifest = try CefManifest.resolve(context: context, explicitPath: manifestPath)
         if let cefVersionOverride, cefVersionOverride != manifest.cef {
             // The manifest only carries artifacts for its own pin; an arbitrary
-            // version has no sha1 to verify against, so be explicit about it.
+            // version has no digest to verify against, so be explicit about it.
             throw CefPluginError(
                 "--cef-version \(cefVersionOverride) does not match the pinned manifest version \(manifest.cef). " +
                 "Update CEF_VERSION.json (Scripts/cef-update.sh) instead of overriding ad hoc, " +
